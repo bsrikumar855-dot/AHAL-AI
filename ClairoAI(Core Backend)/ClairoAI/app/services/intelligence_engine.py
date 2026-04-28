@@ -135,6 +135,26 @@ def enrich_result_with_intelligence(
     sampled_files: List[Dict[str, str]] | None = None,
 ) -> Dict[str, Any]:
     sampled_files = sampled_files or []
+
+    # ── Context integrity guard ─────────────────────────────────
+    # Detect if the pipeline is accidentally analyzing its own source code.
+    from app.services.context_guard import guard_against_self_analysis, filter_external_files
+
+    guard_result = guard_against_self_analysis(sampled_files, threshold=0.4)
+    context_type = guard_result["context_type"]
+
+    if context_type == "MIXED_CONTEXT":
+        # Filter out internal files and continue with external only
+        sampled_files = filter_external_files(sampled_files)
+
+    if context_type == "INTERNAL_ONLY":
+        # Log warning but continue — the caller may intentionally want this
+        result.setdefault("_context_warning", (
+            f"Self-analysis detected: {len(guard_result['internal_files'])} of "
+            f"{len(guard_result['internal_files']) + len(guard_result['external_files'])} "
+            f"sampled files belong to the AHAL AI platform itself."
+        ))
+
     enriched = dict(result)
     workflows = extract_workflows(
         session_type=session_type,

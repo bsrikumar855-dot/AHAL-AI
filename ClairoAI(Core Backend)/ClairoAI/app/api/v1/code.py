@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.core.logging import get_logger
 from app.db.models import SessionDocument, SessionStatus, SessionType
-from app.db.repository import SessionRepository, ensure_valid_session_id
+from app.db.repository import SessionRepository
 from app.db.schemas import CodeAnalyzeRequest, SessionStatusResponse
 from app.services.code_analyzer import CodeAnalyzer
 from app.services.job_manager import process_code_analysis_session, start_background_job
@@ -28,10 +28,12 @@ router = APIRouter()
     description="Queues code analysis and returns a processing session immediately.",
 )
 async def analyze_code(request: CodeAnalyzeRequest):
-    requested_session_id = ensure_valid_session_id(request.session_id) or str(uuid.uuid4())
+    requested_session_id = str(uuid.uuid4())
     user_code = request.code
 
     logger.info(f"Code analysis request received ({len(user_code)} chars)")
+    print("SESSION:", requested_session_id)
+    print("NEW ANALYSIS GENERATED")
 
     analyzer = CodeAnalyzer()
     quick_result = analyzer.build_quick_result(user_code)
@@ -74,7 +76,7 @@ async def analyze_code(request: CodeAnalyzeRequest):
             progress=100,
             stage="Analysis startup delayed",
             result=quick_result,
-            error="Partial analysis completed. Full analysis will resume when processing capacity is available.",
+            error="Fresh analysis failed",
         )
         raise HTTPException(
             status_code=500,

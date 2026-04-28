@@ -11,9 +11,10 @@ from fastapi import APIRouter, HTTPException
 
 from app.core.logging import get_logger
 from app.db.models import SessionDocument, SessionStatus, SessionType
-from app.db.repository import SessionRepository, ensure_valid_session_id
+from app.db.repository import SessionRepository
 from app.db.schemas import RepoAnalyzeRequest, SessionStatusResponse
 from app.services.job_manager import process_repo_analysis_job, start_background_job
+from app.services.repo_service import generate_minimal_analysis
 
 logger = get_logger("api.repo")
 router = APIRouter()
@@ -37,24 +38,29 @@ async def analyze_repo(request: RepoAnalyzeRequest):
     Clients should poll the session status endpoint for progress and partial results.
     """
     repo_url = request.repo_url
-    requested_session_id = ensure_valid_session_id(request.session_id)
+    requested_session_id = str(uuid.uuid4())
 
     logger.info(f"Repo analysis request received for {repo_url}")
+    print("SESSION:", requested_session_id)
+    print("NEW ANALYSIS GENERATED")
     print(f"[REPO ANALYZE] QUEUED URL: {repo_url}")
 
     try:
         repo_name = repo_url.rstrip("/").split("/")[-1] or "repository"
+        initial_result = generate_minimal_analysis([], repo_url)
         session_kwargs = {
             "type": SessionType.REPO,
             "title": f"Repo: {repo_name}",
             "status": SessionStatus.PROCESSING,
             "preview": repo_url,
             "source_ref": repo_url,
+            "summary": initial_result.get("summary_blocks", {}).get("what", ""),
+            "result": initial_result,
             "progress": 0,
             "stage": "Queued repository analysis",
-            "job_id": requested_session_id or str(uuid.uuid4()),
+            "job_id": requested_session_id,
         }
-        session_kwargs["session_id"] = requested_session_id or str(uuid.uuid4())
+        session_kwargs["session_id"] = requested_session_id
 
         session = SessionDocument(**session_kwargs)
         session_id = await SessionRepository.create(session)
@@ -77,7 +83,7 @@ async def analyze_repo(request: RepoAnalyzeRequest):
         await SessionRepository.update_status(
             session_id=session_id,
             status=SessionStatus.FAILED,
-            error="Repository scan started with partial context. Full analysis will resume when processing capacity is available.",
+            error="Fresh analysis failed",
             progress=100,
             stage="Analysis startup delayed",
         )
@@ -98,7 +104,7 @@ async def analyze_repo(request: RepoAnalyzeRequest):
         preview=repo_url,
         source_ref=repo_url,
         structure=[],
-        result=None,
+        result=initial_result,
         error=None,
         progress=0,
         stage="Queued repository analysis",

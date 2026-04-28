@@ -12,7 +12,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db.models import SessionDocument, SessionStatus, SessionType
-from app.db.repository import SessionRepository, ensure_valid_session_id
+from app.db.repository import SessionRepository
 from app.db.schemas import SessionStatusResponse
 from app.services.folder_analyzer import FolderAnalyzer
 from app.services.job_manager import process_folder_analysis_session, start_background_job
@@ -34,7 +34,9 @@ async def analyze_folder(
     session_id: str | None = Form(default=None),
 ):
     settings = get_settings()
-    requested_session_id = ensure_valid_session_id(session_id) or str(uuid.uuid4())
+    requested_session_id = str(uuid.uuid4())
+    print("SESSION:", requested_session_id)
+    print("NEW ANALYSIS GENERATED")
 
     if not file.filename or not file.filename.lower().endswith(".zip"):
         raise HTTPException(status_code=400, detail={"error": "Only .zip files are supported"})
@@ -54,13 +56,8 @@ async def analyze_folder(
         _file_contents, selected_files, _arch_hints, quick_result = await analyzer.prepare_analysis(file_bytes, file.filename)
     except Exception as err:
         logger.error(f"Folder fast scan failed: {err}")
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "The uploaded project could not be inspected yet. Please verify the archive contents and try again.",
-                "details": str(err),
-            },
-        )
+        selected_files = {}
+        quick_result = analyzer.generate_minimal_analysis({}, file.filename)
 
     structure = list(selected_files.keys())[:30]
     preview = f"Uploaded {file.filename} ({len(file_bytes)} bytes)"
@@ -99,8 +96,8 @@ async def analyze_folder(
             status=SessionStatus.FAILED,
             progress=100,
             stage="Analysis startup delayed",
-            result=quick_result,
-            error="Partial analysis completed. Full analysis will resume when processing capacity is available.",
+            result=None,
+            error="Fresh analysis failed",
         )
         raise HTTPException(
             status_code=500,

@@ -1,11 +1,7 @@
 """
 Output normalization utility.
 
-Ensures ALL analysis results conform to strict output standards:
-- No "Unknown" or "string" placeholders
-- No null arrays
-- All strings trimmed
-- All lists are List[str]
+Normalizes analysis results without inventing missing data.
 """
 
 from typing import Any
@@ -60,9 +56,7 @@ def normalize_result(result: dict) -> dict:
         result = {}
 
     # Top-level string fields
-    result["project_goal"] = _clean_str(
-        result.get("project_goal"), "Analysis completed"
-    )
+    result["project_goal"] = _clean_str(result.get("project_goal"), "")
     result["architecture_style"] = _clean_str(
         result.get("architecture_style"), ""
     )

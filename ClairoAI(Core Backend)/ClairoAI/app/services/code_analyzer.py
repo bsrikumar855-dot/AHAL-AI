@@ -15,15 +15,15 @@ from hashlib import sha256
 from typing import Any, Dict
 
 from app.core.logging import get_logger
-from app.services.intelligence_engine import enrich_result_with_intelligence
 from app.services.llm_handler import call_llm_async
 from app.services.normalize import normalize_result
+from app.services.task_router import TaskType, validate_analysis_output
 
 logger = get_logger("services.code_analyzer")
 
-_CODE_ANALYSIS_TIMEOUT_SECONDS = 55
-_CODE_FAST_TIMEOUT_SECONDS = 25
-_CODE_PARTIAL_TIMEOUT_SECONDS = 18
+_CODE_ANALYSIS_TIMEOUT_SECONDS = 90
+_CODE_FAST_TIMEOUT_SECONDS = 45
+_CODE_PARTIAL_TIMEOUT_SECONDS = 30
 _CODE_CACHE_TTL_SECONDS = 600
 _MAX_CODE_LENGTH = 8000
 _CODE_ANALYSIS_CACHE: dict[str, tuple[float, Dict[str, Any]]] = {}
@@ -57,7 +57,7 @@ def _detect_language(code: str) -> str:
         return "JavaScript"
     if re.search(r"\bpackage\s+\w+|public\s+class\s+", code):
         return "Java"
-    return "Unknown"
+    return ""
 
 
 def _detect_pattern(code: str, functions: list[str], classes: list[str], imports: list[str]) -> str:
@@ -114,8 +114,8 @@ def _build_code_snapshot(code: str, static: Dict[str, Any]) -> str:
     if len(compact_code) > 900:
         compact_code = compact_code[:897].rstrip() + "..."
     return "\n".join([
-        f"Language: {static.get('language', 'Unknown')}",
-        f"Pattern: {static.get('pattern', 'Unknown')}",
+        f"Language: {static.get('language', '')}",
+        f"Pattern: {static.get('pattern', '')}",
         f"Functions: {', '.join(static.get('functions', [])[:6]) or '(none)'}",
         f"Classes: {', '.join(static.get('classes', [])[:6]) or '(none)'}",
         f"Imports: {', '.join(static.get('imports', [])[:6]) or '(none)'}",
@@ -132,21 +132,11 @@ def _label_confidence(text: str, confidence: str) -> str:
 
 
 def _cache_get(cache_key: str) -> Dict[str, Any] | None:
-    cached = _CODE_ANALYSIS_CACHE.get(cache_key)
-    if not cached:
-        return None
-    expires_at, payload = cached
-    if expires_at <= time.time():
-        _CODE_ANALYSIS_CACHE.pop(cache_key, None)
-        return None
-    return dict(payload)
+    return None
 
 
 def _cache_set(cache_key: str, payload: Dict[str, Any]) -> None:
-    _CODE_ANALYSIS_CACHE[cache_key] = (time.time() + _CODE_CACHE_TTL_SECONDS, dict(payload))
-    if len(_CODE_ANALYSIS_CACHE) > 128:
-        oldest_key = min(_CODE_ANALYSIS_CACHE, key=lambda key: _CODE_ANALYSIS_CACHE[key][0])
-        _CODE_ANALYSIS_CACHE.pop(oldest_key, None)
+    return None
 
 
 def _merge_result(base: Dict[str, Any], update: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -186,7 +176,7 @@ def _internal_input_detected(code: str) -> bool:
 def _invalid_input_response() -> Dict[str, Any]:
     return {
         "project_goal": "Invalid input - system prompt detected",
-        "architecture_style": "none",
+        "architecture_style": "",
         "key_modules": [],
         "core_features": ["Internal system code detected"],
         "risks": ["Wrong input passed to analyzer"],
@@ -199,79 +189,24 @@ def _invalid_input_response() -> Dict[str, Any]:
     }
 
 
-def _smart_code_fallback(static: Dict[str, Any]) -> Dict[str, Any]:
-    features: list[str] = []
-    if static.get("functions"):
-        features.append(f"Implements callable logic through {', '.join(static['functions'][:3])}")
-    if static.get("classes"):
-        features.append(f"Uses class-based structure via {', '.join(static['classes'][:3])}")
-    if static.get("imports"):
-        features.append(f"Depends on modules such as {', '.join(static['imports'][:3])}")
-    if not features:
-        features = [
-            "The code defines a focused software module with a clear execution path",
-            "The implementation appears to solve a specific application task",
-        ]
-
-    modules = list(static.get("functions", [])[:4]) + list(static.get("classes", [])[:3])
+def _empty_code_result(static: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    static = static or {}
+    modules = []
+    modules.extend(static.get("functions", [])[:4])
+    modules.extend(static.get("classes", [])[:4])
     return {
-        "project_goal": f"A {static.get('pattern', 'code module').lower()} in {static.get('language', 'the detected language')} focused on the logic surfaced in the analyzed functions and classes.",
-        "architecture_style": static.get("pattern", "Code module"),
-        "key_modules": modules or ["main"],
-        "core_features": features,
-        "risks": [
-            "Some reasoning is inferred from code structure rather than a full semantic execution trace",
-            "A deeper AI pass would improve runtime-path and edge-case coverage",
-        ],
+        "project_goal": "",
+        "architecture_style": static.get("pattern", ""),
+        "key_modules": modules,
+        "core_features": [],
+        "risks": [],
         "summary_blocks": {
-            "what": _label_confidence("The code is organized around the detected functions, classes, and imports and has been interpreted from its structure and behavior hints.", "MEDIUM"),
-            "why": _label_confidence("Partial analysis completed from code structure, detected symbols, and behavior hints. Deeper semantic refinement can extend this view.", "MEDIUM"),
-            "remaining": ["Add stronger validation around inputs and outputs", "Review edge cases and exception paths in the surrounding workflow"],
-            "issues": ["Some runtime assumptions are inferred from static structure", "Cross-module behavior may need a deeper AI pass"],
+            "what": "",
+            "why": "",
+            "remaining": [],
+            "issues": [],
         },
     }
-
-
-def force_non_empty_code_output(result: Dict[str, Any], static: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    sb = result.setdefault("summary_blocks", {})
-    static = static or {}
-
-    if not result.get("key_modules"):
-        modules = []
-        modules.extend(static.get("functions", [])[:4])
-        modules.extend(static.get("classes", [])[:4])
-        result["key_modules"] = modules or ["main"]
-
-    if not result.get("core_features"):
-        features = []
-        if static.get("functions"):
-            features.append(f"Defines functions: {', '.join(static['functions'][:3])}")
-        if static.get("classes"):
-            features.append(f"Defines classes: {', '.join(static['classes'][:3])}")
-        if static.get("imports"):
-            features.append(f"Imports: {', '.join(static['imports'][:3])}")
-        result["core_features"] = features or ["Code structure detected"]
-
-    if not result.get("risks"):
-        result["risks"] = [
-            "No obvious critical risks were detected in the submitted code sample",
-            "A deeper runtime-aware review would improve edge-case coverage",
-        ]
-
-    if not sb.get("what"):
-        sb["what"] = _label_confidence(f"{static.get('language', '')} {static.get('pattern', '')}".strip() or "Code structure analyzed", "MEDIUM")
-    if not sb.get("why"):
-        sb["why"] = _label_confidence("Partial analysis completed from code structure, detected symbols, and behavior hints. Deeper semantic refinement can extend this view.", "MEDIUM")
-    if not sb.get("remaining"):
-        sb["remaining"] = ["Add input validation", "Improve error handling"]
-    if not sb.get("issues"):
-        sb["issues"] = ["Review recommended for production readiness"]
-
-    if not result.get("architecture_style"):
-        result["architecture_style"] = static.get("pattern", "Code module")
-
-    result["summary_blocks"] = sb
-    return result
 
 
 CODE_PROMPT = """Analyze this {language} code and return ONLY valid JSON.
@@ -303,9 +238,11 @@ OUTPUT (JSON only - no markdown, no explanation):
 
 RULES:
 - key_modules = ONLY real names from the code (functions, classes)
+- If no real key_modules exist, return []
 - core_features = ACTUAL behavior, not generic phrases
 - risks = concrete issues, not vague warnings
-- Every list must have at least 2 items
+- Lists MAY be empty
+- Do NOT invent data
 - Return JSON ONLY"""
 
 CODE_FAST_PROMPT = """Analyze this code snapshot and return ONLY valid JSON.
@@ -390,36 +327,18 @@ async def _call_code_llm(prompt: str, timeout: int, mode: str, label: str) -> Di
 
 
 async def _run_code_llm_enhancement(code: str, static: Dict[str, Any], prompt: str, mode: str) -> Dict[str, Any]:
-    cache_key = sha256(code.encode("utf-8")).hexdigest()
-    cached = _cache_get(cache_key)
-    if cached:
-        print("[CODE] Analysis cache hit")
-        return cached
-
     snapshot = _build_code_snapshot(code, static)
-    base_result = _smart_code_fallback(static)
 
     full_result = await _call_code_llm(prompt, _CODE_ANALYSIS_TIMEOUT_SECONDS, mode, "full")
     if full_result:
-        merged = _merge_result(base_result, full_result)
-        merged["summary_blocks"]["what"] = _label_confidence(merged["summary_blocks"].get("what", ""), "HIGH")
-        merged["summary_blocks"]["why"] = _label_confidence(merged["summary_blocks"].get("why", ""), "HIGH")
-        _cache_set(cache_key, merged)
-        return merged
+        return _merge_result(_empty_code_result(static), full_result)
 
     await asyncio.sleep(1.0)
     fast_result = await _call_code_llm(CODE_FAST_PROMPT.format(snapshot=snapshot), _CODE_FAST_TIMEOUT_SECONDS, mode, "fast")
     if fast_result:
-        merged = _merge_result(base_result, fast_result)
-        merged["summary_blocks"]["what"] = _label_confidence(merged["summary_blocks"].get("what", ""), "HIGH")
-        merged["summary_blocks"]["why"] = _label_confidence(
-            merged["summary_blocks"].get("why", "") or "Partial analysis completed and refined through targeted AI passes.",
-            "HIGH",
-        )
-        _cache_set(cache_key, merged)
-        return merged
+        return _merge_result(_empty_code_result(static), fast_result)
 
-    merged = dict(base_result)
+    merged = dict(_empty_code_result(static))
     partial_successes = 0
     partial_specs = [
         ("goal", CODE_GOAL_PROMPT.format(snapshot=snapshot)),
@@ -435,29 +354,16 @@ async def _run_code_llm_enhancement(code: str, static: Dict[str, Any], prompt: s
             await asyncio.sleep(1.0)
 
     if partial_successes > 0:
-        merged["summary_blocks"]["what"] = _label_confidence(merged["summary_blocks"].get("what", ""), "HIGH")
-        merged["summary_blocks"]["why"] = _label_confidence(
-            "Partial analysis completed through targeted AI recovery plus structural inference from the code sample.",
-            "HIGH",
-        )
-        _cache_set(cache_key, merged)
         return merged
 
-    _cache_set(cache_key, base_result)
-    return base_result
+    raise RuntimeError("LLM_FAILED: Fresh analysis failed")
 
 
 class CodeAnalyzer:
     def build_quick_result(self, code: str) -> Dict[str, Any]:
         static = _extract_static_info(code)
-        base = normalize_result(force_non_empty_code_output(_smart_code_fallback(static), static))
-        return normalize_result(
-            enrich_result_with_intelligence(
-                session_type="code",
-                result=base,
-                sampled_files=[{"path": "inline_code.py", "content": code}],
-            )
-        )
+        base = normalize_result(_empty_code_result(static))
+        return validate_analysis_output(base, TaskType.PROJECT_ANALYSIS)
 
     async def analyze(self, code: str, mode: str = "offline") -> Dict[str, Any]:
         started_total = time.monotonic()
@@ -518,11 +424,5 @@ class CodeAnalyzer:
             },
         }
 
-        normalized = normalize_result(force_non_empty_code_output(result, static))
-        return normalize_result(
-            enrich_result_with_intelligence(
-                session_type="code",
-                result=normalized,
-                sampled_files=[{"path": "inline_code.py", "content": code}],
-            )
-        )
+        normalized = normalize_result(result)
+        return validate_analysis_output(normalized, TaskType.PROJECT_ANALYSIS)

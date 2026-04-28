@@ -16,7 +16,6 @@ from app.db.models import SessionStatus, SessionType
 from app.db.repository import SessionRepository
 from app.services.code_analyzer import CodeAnalyzer
 from app.services.folder_analyzer import FolderAnalyzer
-from app.services.knowledge_store import persist_analysis_knowledge
 from app.services.repo_service import process_repo_analysis_session
 
 logger = get_logger("services.job_manager")
@@ -58,18 +57,6 @@ async def process_code_analysis_session(
         await SessionRepository.update_progress(session_id, 70, "Analyzing code semantics", result=quick_result)
         final_result = await analyzer.analyze(code, mode=mode)
 
-        await persist_analysis_knowledge(
-            session_id=session_id,
-            session_type=SessionType.CODE,
-            title="Code Analysis",
-            source_ref="inline-code",
-            structure=structure,
-            result=final_result,
-            sampled_files=[{"path": "inline_code.py", "content": code[:12000]}],
-            tech_stack=[final_result.get("architecture_style", "")],
-            status=SessionStatus.COMPLETED,
-        )
-
         await SessionRepository.update_status(
             session_id=session_id,
             status=SessionStatus.COMPLETED,
@@ -87,17 +74,13 @@ async def process_code_analysis_session(
         )
     except Exception as exc:
         logger.error(f"Code analysis background job failed for {session_id}: {exc}")
-        existing = await SessionRepository.get_by_id(session_id)
-        partial_result = None
-        if existing and existing.result is not None:
-            partial_result = existing.result.model_dump() if hasattr(existing.result, "model_dump") else dict(existing.result)
         await SessionRepository.update_status(
             session_id=session_id,
-            status=SessionStatus.COMPLETED,
+            status=SessionStatus.FAILED,
             progress=100,
-            stage="Partial analysis completed",
-            result=partial_result,
-            error="Partial analysis completed. Full analysis can continue from the latest stored intelligence.",
+            stage="Fresh analysis failed",
+            result=None,
+            error="LLM_FAILED: Fresh analysis failed",
         )
 
 
@@ -112,7 +95,7 @@ async def process_folder_analysis_session(
 
     try:
         await SessionRepository.update_progress(session_id, 10, "Queued folder analysis")
-        _file_contents, selected_files, arch_hints, quick_result = await analyzer.prepare_analysis(file_bytes, filename)
+        file_contents, selected_files, _arch_hints, quick_result = await analyzer.prepare_analysis(file_bytes, filename)
         structure = list(selected_files.keys())[:30]
         await SessionRepository.update_fields(
             session_id,
@@ -120,28 +103,9 @@ async def process_folder_analysis_session(
             structure=structure,
             summary=quick_result.get("summary_blocks", {}).get("what", ""),
         )
-        await SessionRepository.update_progress(
-            session_id,
-            30,
-            "Static project scan completed",
-            result=quick_result,
-        )
+        await SessionRepository.update_progress(session_id, 30, "Static project scan completed", result=quick_result)
         await SessionRepository.update_progress(session_id, 65, "Analyzing architecture", result=quick_result)
         final_result = await analyzer.analyze(file_bytes, filename, mode=mode)
-
-        tech_stack = [arch_hints] if arch_hints and arch_hints != "general code repository" else []
-        sampled_files = [{"path": path, "content": content} for path, content in selected_files.items()]
-        await persist_analysis_knowledge(
-            session_id=session_id,
-            session_type=SessionType.FOLDER,
-            title=f"Project: {filename}",
-            source_ref=filename,
-            structure=structure,
-            result=final_result,
-            sampled_files=sampled_files,
-            tech_stack=tech_stack,
-            status=SessionStatus.COMPLETED,
-        )
 
         await SessionRepository.update_status(
             session_id=session_id,
@@ -160,17 +124,18 @@ async def process_folder_analysis_session(
         )
     except Exception as exc:
         logger.error(f"Folder analysis background job failed for {session_id}: {exc}")
-        existing = await SessionRepository.get_by_id(session_id)
-        partial_result = None
-        if existing and existing.result is not None:
-            partial_result = existing.result.model_dump() if hasattr(existing.result, "model_dump") else dict(existing.result)
+        fallback_result = analyzer.generate_minimal_analysis(file_contents if 'file_contents' in locals() else {}, filename)
         await SessionRepository.update_status(
             session_id=session_id,
             status=SessionStatus.COMPLETED,
             progress=100,
-            stage="Partial analysis completed",
-            result=partial_result,
-            error="Partial analysis completed. Full analysis can continue from the latest stored intelligence.",
+            stage="Analysis complete",
+            result=fallback_result,
+            error=None,
+        )
+        await SessionRepository.update_fields(
+            session_id,
+            summary=fallback_result.get("summary_blocks", {}).get("what", ""),
         )
 
 

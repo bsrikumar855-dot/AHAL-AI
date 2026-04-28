@@ -1,8 +1,8 @@
 """
 Mode-specific chat context builder.
 
-The chat assistant uses this module to build a rich, grounded context from the
-latest stored analysis session or a specific requested session.
+Also exposes strict analysis-context helpers that only operate on uploaded
+project files and do not pull in any stored system context.
 """
 
 from typing import Any, Dict, Optional
@@ -16,6 +16,85 @@ logger = get_logger("services.context_builder")
 
 MAX_CONTEXT_CHARS = 6000
 CHAT_MODES = {"code", "folder", "repo"}
+BLOCKED_ANALYSIS_PATHS = [
+    "app/",
+    "services/",
+    "core/",
+    "db/",
+    "api/",
+    "repo_service.py",
+    "code_analyzer.py",
+    "folder_analyzer.py",
+    "intelligence_engine.py",
+    "knowledge_store.py",
+    "chat_service.py",
+]
+
+
+def is_external_file(path: str) -> bool:
+    normalized = str(path or "").replace("\\", "/").lower()
+    blocked = [item.lower() for item in BLOCKED_ANALYSIS_PATHS]
+    return not any(item in normalized for item in blocked)
+
+
+def filter_analysis_files(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    filtered_files = [
+        file_info
+        for file_info in files
+        if is_external_file(str(file_info.get("path", "")))
+    ]
+    return filtered_files
+
+
+def validate_analysis_files(files: list[dict[str, Any]]) -> None:
+    for file_info in files:
+        path = str(file_info.get("path", "")).replace("\\", "/").lower()
+        if "app/" in path or "services/" in path:
+            raise ValueError("Context contamination detected")
+
+
+def build_analysis_context(
+    files: list[dict[str, Any]],
+    *,
+    max_chars_per_file: int = 1500,
+    max_context_chars: int = 8000,
+) -> str:
+    filtered_files = filter_analysis_files(files)
+    validate_analysis_files(filtered_files)
+
+    print("=== FILES SENT TO LLM ===")
+    for file_info in filtered_files:
+        print(str(file_info.get("path", "")))
+
+    parts: list[str] = []
+    total = 0
+    for file_info in filtered_files:
+        path = str(file_info.get("path", "")).strip()
+        content = str(file_info.get("content", "") or "")
+        if not path or not content.strip():
+            continue
+
+        truncated = content
+        if len(truncated) > max_chars_per_file:
+            head_size = max_chars_per_file * 2 // 3
+            tail_size = max_chars_per_file // 3
+            truncated = (
+                truncated[:head_size].rstrip()
+                + "\n...(middle trimmed)...\n"
+                + truncated[-tail_size:].lstrip()
+            )
+
+        snippet = f"=== FILE: {path} ===\n{truncated}"
+        if total + len(snippet) > max_context_chars:
+            remaining = max_context_chars - total
+            if remaining > 200:
+                parts.append(snippet[:remaining])
+            break
+
+        parts.append(snippet)
+        total += len(snippet)
+
+    return "\n\n".join(parts)
 
 
 async def _fetch_session_by_id(session_id: str) -> Optional[Dict[str, Any]]:

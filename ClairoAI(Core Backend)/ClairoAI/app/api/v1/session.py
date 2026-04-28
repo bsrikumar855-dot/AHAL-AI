@@ -125,6 +125,14 @@ async def get_session_intelligence(session_id: str):
     session = await SessionRepository.get_by_id(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
+    if getattr(session.status, "value", session.status) != "completed":
+        return SessionIntelligenceResponse(
+            session_id=session_id,
+            project={"status": getattr(session.status, "value", str(session.status)), "message": "Analysis in progress"},
+            workflows=[],
+            graph={},
+            memory_profile={},
+        )
     knowledge_snapshot = await build_knowledge_snapshot(session_id)
     memory_profile = await get_memory_profile(session_id)
     return SessionIntelligenceResponse(
@@ -202,8 +210,12 @@ async def get_session_report(session_id: str):
     if session is None:
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
 
-    if session.result is None:
-        raise HTTPException(status_code=400, detail=f"Session '{session_id}' has no analysis result yet")
+    if getattr(session.status, "value", session.status) != "completed" or session.result is None:
+        return SessionReportResponse(
+            session_id=session.session_id,
+            type=session.type.value,
+            report="Analysis in progress",
+        )
 
     result_dict = session.result.model_dump() if hasattr(session.result, "model_dump") else dict(session.result)
     knowledge_snapshot = await build_knowledge_snapshot(session_id)
