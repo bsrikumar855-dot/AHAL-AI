@@ -1,0 +1,11 @@
+# ContextBridge AI - Dependencies
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+motor==3.6.0
+pymongo>=4.9,<4.10
+pydantic>=2.10,<3.0
+pydantic-settings>=2.7,<3.0
+python-multipart==0.0.20
+httpx==0.28.1
+python-dotenv==1.0.1
+google-genai>=1.15.0

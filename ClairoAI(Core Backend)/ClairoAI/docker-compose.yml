@@ -1,0 +1,64 @@
+# ContextBridge AI — Docker Compose
+# Spins up the API server, MongoDB, and Ollama together.
+
+services:
+  # ── API Server ──────────────────────────────────────────────
+  api:
+    build: .
+    container_name: contextbridge-api
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGODB_URL=mongodb://mongodb:27017
+      - DB_NAME=contextbridge
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - LOG_LEVEL=INFO
+      - RAG_ENABLED=false
+    depends_on:
+      mongodb:
+        condition: service_started
+      ollama:
+        condition: service_started
+    volumes:
+      - uploads:/app/uploads
+    restart: unless-stopped
+    networks:
+      - contextbridge
+
+  # ── MongoDB ─────────────────────────────────────────────────
+  mongodb:
+    image: mongo:7
+    container_name: contextbridge-mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    restart: unless-stopped
+    networks:
+      - contextbridge
+
+  # ── Ollama (LLM Runtime) ───────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: contextbridge-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    networks:
+      - contextbridge
+    # To pull Gemma model after first startup:
+    #   docker exec -it contextbridge-ollama ollama pull gemma:7b
+
+volumes:
+  mongo_data:
+    driver: local
+  ollama_data:
+    driver: local
+  uploads:
+    driver: local
+
+networks:
+  contextbridge:
+    driver: bridge
