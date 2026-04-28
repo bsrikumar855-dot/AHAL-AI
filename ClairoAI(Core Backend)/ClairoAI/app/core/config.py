@@ -11,10 +11,10 @@ from pydantic import Field
 
 
 class Settings(BaseSettings):
-    """Central configuration for ContextBridge AI."""
+    """Central configuration for AHAL AI."""
 
     # ── Application ──────────────────────────────────────────────
-    APP_NAME: str = "ContextBridge AI"
+    APP_NAME: str = "AHAL AI"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"

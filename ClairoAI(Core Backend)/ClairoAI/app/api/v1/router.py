@@ -17,6 +17,7 @@ from app.api.v1.code import router as code_router
 from app.api.v1.folder import router as folder_router
 from app.api.v1.session import router as session_router
 from app.api.v1.chat import router as chat_router
+from app.api.v1.identity import router as identity_router
 
 router = APIRouter(prefix="/api/v1")
 
@@ -33,3 +34,4 @@ router.include_router(code_router, prefix="/code", tags=["Code Analysis"])
 router.include_router(folder_router, prefix="/folder", tags=["Folder Analysis"])
 router.include_router(session_router, prefix="/session", tags=["Sessions"])
 router.include_router(chat_router, prefix="/chat", tags=["Chat"])
+router.include_router(identity_router, tags=["Product Identity"])

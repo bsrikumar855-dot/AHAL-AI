@@ -1,5 +1,5 @@
 """
-ContextBridge AI — Application Entry Point
+AHAL AI — Application Entry Point
 
 FastAPI app factory with:
 - Lifespan management (MongoDB connect/disconnect)
@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
 from app.core.logging import setup_logging, get_logger
 from app.core.exceptions import register_exception_handlers
+from app.core.product_identity import PRODUCT_NAME, PRODUCT_TAGLINE, PRODUCT_GOAL, get_product_summary
 from app.db.mongodb import mongodb
 from app.api.v1.router import router as v1_router
 
@@ -69,12 +70,9 @@ def create_app() -> FastAPI:
     settings = get_settings()
 
     app = FastAPI(
-        title=settings.APP_NAME,
+        title=PRODUCT_NAME,
         version=settings.APP_VERSION,
-        description=(
-            "AI-powered developer tool that transforms code changes "
-            "into structured, queryable knowledge using Gemma models."
-        ),
+        description=PRODUCT_GOAL,
         docs_url="/docs",
         redoc_url="/redoc",
         lifespan=lifespan,
@@ -135,10 +133,13 @@ def create_app() -> FastAPI:
     @app.get("/", tags=["Root"])
     async def root():
         return {
-            "name": settings.APP_NAME,
+            "name": PRODUCT_NAME,
+            "tagline": PRODUCT_TAGLINE,
             "version": settings.APP_VERSION,
+            "summary": get_product_summary(),
             "docs": "/docs",
             "health": "/api/v1/health",
+            "identity": "/api/v1/identity",
         }
 
     return app
