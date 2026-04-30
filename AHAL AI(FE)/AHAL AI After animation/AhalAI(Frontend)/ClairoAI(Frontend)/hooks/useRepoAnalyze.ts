@@ -2,10 +2,28 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { analyzeRepo, buildSessionStreamUrl, createAnalysisSessionId, getSessionStatus } from "@/lib/api";
+import { analyzeRepo, createAnalysisSessionId, getJobResult, getJobStatus, isBackgroundProcessingMessage } from "@/lib/api";
 import type { AnalysisResult, SessionStatusResponse } from "@/types";
 
-const POLL_INTERVAL_MS = 1800;
+const POLL_INTERVAL_MS = 1000;
+const MIN_STARTED_PROGRESS = 5;
+
+function displayStage(stage?: string | null, progress = 0) {
+  const normalized = String(stage || "").toLowerCase();
+  if (normalized.includes("final")) return "finalizing";
+  if (normalized.includes("insight")) return "generating insights";
+  if (normalized.includes("analy")) return "analyzing";
+  if (normalized.includes("upload")) return "uploading";
+  if (progress >= 95) return "finalizing";
+  if (progress >= 70) return "generating insights";
+  if (progress >= 25) return "analyzing";
+  return "uploading";
+}
+
+function visibleProgress(value?: number | null, status?: string | null) {
+  const progress = Math.max(0, Math.min(100, Number(value || 0)));
+  return status === "processing" ? Math.max(progress, MIN_STARTED_PROGRESS) : progress;
+}
 
 interface UseRepoAnalyzeReturn {
   result: AnalysisResult | null;
@@ -19,15 +37,17 @@ interface UseRepoAnalyzeReturn {
   reset: () => void;
 }
 
-function toAnalysisResult(status: SessionStatusResponse): AnalysisResult | null {
-  if (!status.result) {
+function toAnalysisResult(
+  payload: { type: AnalysisResult["type"]; session_id: string; result: object | null }
+): AnalysisResult | null {
+  if (!payload.result) {
     return null;
   }
 
   return {
-    type: status.type,
-    session_id: status.session_id,
-    ...status.result,
+    ...(payload.result as Omit<AnalysisResult, "type" | "session_id">),
+    type: payload.type,
+    session_id: payload.session_id,
   };
 }
 
@@ -39,126 +59,124 @@ export function useRepoAnalyze(): UseRepoAnalyzeReturn {
   const [progress, setProgress] = useState(0);
   const [stage, setStage] = useState<string | null>(null);
   const [status, setStatus] = useState<"processing" | "completed" | "failed" | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const streamRef = useRef<EventSource | null>(null);
+  const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const stopPolling = useCallback(() => {
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-    if (streamRef.current) {
-      streamRef.current.close();
-      streamRef.current = null;
+    if (pollTimeoutRef.current) {
+      clearTimeout(pollTimeoutRef.current);
+      pollTimeoutRef.current = null;
     }
   }, []);
 
-  const syncStatus = useCallback((payload: SessionStatusResponse) => {
-    setSessionId(payload.session_id);
-    setStatus(payload.status);
-    setProgress(payload.progress ?? 0);
-    setStage(payload.stage || null);
+  const schedulePoll = useCallback((jobId: string, run: () => Promise<void>) => {
+    pollTimeoutRef.current = setTimeout(() => {
+      void run();
+    }, POLL_INTERVAL_MS);
+  }, []);
 
-    const nextResult = toAnalysisResult(payload);
-    if (nextResult) {
-      setResult(nextResult);
-    }
-
-    if (payload.status === "failed") {
-      setLoading(false);
-      setError(
-        payload.error ||
-          "Partial analysis completed. Full analysis is still processing in background."
-      );
-      stopPolling();
-      return;
-    }
-
-    if (payload.status === "completed") {
-      setLoading(false);
-      setError(null);
-      stopPolling();
-      return;
-    }
-
-    setLoading(true);
-  }, [stopPolling]);
-
-  const pollStatus = useCallback(async (activeSessionId: string) => {
+  const pollUntilComplete = useCallback(async (jobId: string) => {
     try {
-      const payload = await getSessionStatus(activeSessionId);
-      syncStatus(payload);
+      const payload: SessionStatusResponse = await getJobStatus(jobId);
+      setSessionId(payload.session_id);
+      const nextProgress = visibleProgress(payload.progress, payload.status);
+      setProgress(nextProgress);
+      setStage(displayStage(payload.stage, nextProgress));
+      setStatus(payload.status);
+
+      if (payload.status === "failed") {
+        setLoading(false);
+        setResult(null);
+        setError(payload.error || "Repository analysis failed.");
+        stopPolling();
+        return;
+      }
+
+      if (payload.status === "completed") {
+        const finalPayload = payload.result ? payload : await getJobResult(jobId);
+        const next = toAnalysisResult(finalPayload);
+        if (!next && finalPayload.status !== "failed") {
+          setLoading(true);
+          setStatus("processing");
+          setStage("finalizing");
+          schedulePoll(jobId, () => pollUntilComplete(jobId));
+          return;
+        }
+        setResult(next);
+        setLoading(false);
+        setError(finalPayload.error || null);
+        setProgress(100);
+        setStage("finalizing");
+        setStatus("completed");
+        stopPolling();
+        return;
+      }
+
+      setLoading(true);
+      setError(null);
+      schedulePoll(jobId, () => pollUntilComplete(jobId));
     } catch (err) {
       console.error("API ERROR:", err);
+      const message = err instanceof Error ? err.message : "Unable to fetch repository analysis status.";
+      if (isBackgroundProcessingMessage(message)) {
+        setLoading(true);
+        setStatus("processing");
+        setError(null);
+        setProgress((current) => Math.max(current, MIN_STARTED_PROGRESS));
+        setStage("generating insights");
+        schedulePoll(jobId, () => pollUntilComplete(jobId));
+        return;
+      }
       setLoading(false);
       setStatus("failed");
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Partial analysis completed. Live progress updates are temporarily paused."
-      );
+      setError(message);
       stopPolling();
     }
-  }, [stopPolling, syncStatus]);
-
-  const startPolling = useCallback((activeSessionId: string) => {
-    stopPolling();
-    if (typeof window !== "undefined" && "EventSource" in window) {
-      const stream = new EventSource(buildSessionStreamUrl(activeSessionId));
-      stream.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data) as SessionStatusResponse;
-          syncStatus(payload);
-        } catch (error) {
-          console.error("SSE PARSE ERROR:", error);
-        }
-      };
-      stream.onerror = () => {
-        stream.close();
-        streamRef.current = null;
-        pollRef.current = setInterval(() => {
-          void pollStatus(activeSessionId);
-        }, POLL_INTERVAL_MS);
-      };
-      streamRef.current = stream;
-      return;
-    }
-    pollRef.current = setInterval(() => {
-      void pollStatus(activeSessionId);
-    }, POLL_INTERVAL_MS);
-  }, [pollStatus, stopPolling]);
+  }, [schedulePoll, stopPolling]);
 
   const analyze = useCallback(async (repoUrl: string) => {
     stopPolling();
     setResult(null);
     setLoading(true);
     setError(null);
-    setProgress(0);
-    setStage("Submitting repository");
+    setProgress(MIN_STARTED_PROGRESS);
+    setStage("uploading");
     setStatus("processing");
+    const currentSessionId = createAnalysisSessionId("repo");
 
     try {
-      const currentSessionId = createAnalysisSessionId("repo");
       setSessionId(currentSessionId);
 
       const initialStatus = await analyzeRepo(repoUrl, currentSessionId);
-      syncStatus(initialStatus);
+      const jobId = initialStatus.task_id || initialStatus.job_id || initialStatus.session_id || currentSessionId;
 
-      if (initialStatus.status === "processing") {
-        startPolling(initialStatus.session_id);
-        void pollStatus(initialStatus.session_id);
+      setSessionId(initialStatus.session_id);
+      const nextProgress = visibleProgress(initialStatus.progress, initialStatus.status);
+      setProgress(nextProgress);
+      setStage(displayStage(initialStatus.stage, nextProgress));
+      setStatus(initialStatus.status);
+
+      if (jobId) {
+        void pollUntilComplete(jobId);
+      } else {
+        throw new Error("Analysis job id was not returned by the backend.");
       }
     } catch (err) {
       console.error("API ERROR:", err);
+      const message = err instanceof Error ? err.message : "Unable to start repository analysis.";
+      if (isBackgroundProcessingMessage(message) && currentSessionId) {
+        setLoading(true);
+        setStatus("processing");
+        setError(null);
+        setProgress((current) => Math.max(current, MIN_STARTED_PROGRESS));
+        setStage("analyzing");
+        void pollUntilComplete(currentSessionId);
+        return;
+      }
       setLoading(false);
       setStatus("failed");
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Repository analysis is still preparing. Please retry in a moment."
-      );
+      setError(message);
     }
-  }, [pollStatus, startPolling, stopPolling, syncStatus]);
+  }, [pollUntilComplete, stopPolling]);
 
   const reset = useCallback(() => {
     stopPolling();

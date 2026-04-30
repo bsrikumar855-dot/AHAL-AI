@@ -7,6 +7,11 @@ export const metadata: Metadata = {
   title: "AHAL AI - Intelligence That Brings Light",
   description:
     "Understand any codebase instantly with AI. Analyze code snippets, project folders, and GitHub repositories to extract structured intelligence.",
+  icons: {
+    icon: "/branding/Ahal%20logo.jpeg",
+    shortcut: "/branding/Ahal%20logo.jpeg",
+    apple: "/branding/Ahal%20logo.jpeg",
+  },
   keywords: [
     "AI",
     "code analysis",

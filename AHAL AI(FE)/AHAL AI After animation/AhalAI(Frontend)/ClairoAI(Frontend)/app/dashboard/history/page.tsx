@@ -9,15 +9,12 @@ import {
   FolderGit2,
   GitBranch,
   ChevronRight,
-  AlertCircle,
-  Target,
-  Layers,
+  Trash2,
 } from "lucide-react";
-import { getSessionHistory, getSessionStatus } from "@/lib/api";
+import { deleteSession, getSessionHistory, getSessionStatus } from "@/lib/api";
 import type { SessionHistoryItem, SessionStatusResponse } from "@/types";
 import { formatDate } from "@/lib/utils";
 import { ResultPanel } from "@/components/cards/result-panel";
-import type { AnalysisResult } from "@/types";
 
 type FilterType = "all" | "code" | "folder" | "repo";
 
@@ -30,6 +27,7 @@ export default function HistoryPage() {
   const [expandedResult, setExpandedResult] =
     useState<SessionStatusResponse | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const fetchSessions = async (type: FilterType) => {
     setLoading(true);
@@ -68,6 +66,27 @@ export default function HistoryPage() {
       setExpandedResult(null);
     } finally {
       setLoadingDetail(false);
+    }
+  };
+
+  const handleDelete = async (sessionId: string) => {
+    if (deletingId) {
+      return;
+    }
+
+    setDeletingId(sessionId);
+    try {
+      await deleteSession(sessionId);
+      setSessions((current) => current.filter((session) => session.session_id !== sessionId));
+      setTotal((current) => Math.max(0, current - 1));
+      if (expandedId === sessionId) {
+        setExpandedId(null);
+        setExpandedResult(null);
+      }
+    } catch (error) {
+      console.error("API ERROR:", error);
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -170,10 +189,12 @@ export default function HistoryPage() {
               transition={{ delay: i * 0.03 }}
             >
               {/* Session Row */}
-              <button
-                onClick={() => handleExpand(session.session_id)}
-                className="w-full glass-card p-4 rounded-xl flex items-center justify-between hover:bg-white/[0.04] transition-all text-left group"
-              >
+              <div className="glass-card rounded-xl p-4 transition-all hover:bg-white/[0.04] group">
+                <div className="flex items-center justify-between gap-4">
+                  <button
+                    onClick={() => handleExpand(session.session_id)}
+                    className="flex flex-1 items-center justify-between text-left"
+                  >
                 <div className="flex items-center gap-3 flex-1 min-w-0">
                   <div
                     className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 ${getTypeBg(
@@ -216,7 +237,20 @@ export default function HistoryPage() {
                     <ChevronRight className="w-4 h-4 text-slate-600 group-hover:text-slate-400" />
                   </motion.div>
                 </div>
-              </button>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleDelete(session.session_id);
+                    }}
+                    disabled={deletingId === session.session_id}
+                    className="rounded-lg border border-red-500/10 bg-red-500/5 p-2 text-red-300 transition-all hover:border-red-400/30 hover:bg-red-500/10 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-50"
+                    aria-label={`Delete ${session.title}`}
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
 
               {/* Expanded Result */}
               {expandedId === session.session_id && (
@@ -242,22 +276,7 @@ export default function HistoryPage() {
                         result={{
                           type: expandedResult.type,
                           session_id: expandedResult.session_id,
-                          project_goal:
-                            expandedResult.result.project_goal || "",
-                          architecture_style:
-                            expandedResult.result.architecture_style || "",
-                          key_modules:
-                            expandedResult.result.key_modules || [],
-                          core_features:
-                            expandedResult.result.core_features || [],
-                          risks: expandedResult.result.risks || [],
-                          summary_blocks:
-                            expandedResult.result.summary_blocks || {
-                              what: "",
-                              why: "",
-                              remaining: [],
-                              issues: [],
-                            },
+                          ...expandedResult.result,
                         }}
                       />
                     </div>

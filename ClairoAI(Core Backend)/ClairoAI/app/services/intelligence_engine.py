@@ -47,43 +47,35 @@ def _extract_entry_points(sampled_files: List[Dict[str, str]]) -> List[str]:
     return _dedupe(entry_points)[:6]
 
 
+def _ensure_step_list(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return _dedupe(str(item).strip() for item in value if str(item).strip())
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return [cleaned] if cleaned else []
+    return []
+
+
+def generate_inferred_workflow(context: Dict[str, Any] | None = None) -> Dict[str, List[str]]:
+    return {
+        "initialization": [],
+        "request_flow": [],
+        "processing_flow": [],
+        "response_flow": [],
+    }
+
+
+def generate_basic_insights(context: Dict[str, Any] | None = None) -> List[Dict[str, str]]:
+    return []
+
+
 def _build_insights(
     result: Dict[str, Any],
     sampled_files: List[Dict[str, str]],
     workflows: List[Dict[str, Any]],
     graph: Dict[str, Any],
-) -> List[str]:
-    insights: List[str] = []
-    central_nodes = _dedupe(graph.get("central_nodes", []))[:4]
-    entry_points = _dedupe(graph.get("entry_points", []))[:3] or _extract_entry_points(sampled_files)
-    all_paths = " ".join(str(file_info.get("path", "")).lower() for file_info in sampled_files)
-    architecture = str(result.get("architecture_style", "")).strip()
-    features = _dedupe(result.get("core_features", []))[:4]
-    risks = _dedupe(result.get("risks", []))[:4]
-
-    if architecture:
-        insights.append(f"The system appears to follow a {architecture} architecture with responsibilities split across focused modules.")
-    if entry_points:
-        insights.append(f"Execution likely begins in {', '.join(entry_points[:2])} before control moves into the core application flow.")
-    if central_nodes:
-        insights.append(f"Core coordination appears concentrated around {', '.join(central_nodes[:3])}, which look like the highest-impact modules.")
-    if workflows:
-        primary = workflows[0]
-        steps = _dedupe(primary.get("steps", []))[:4]
-        if steps:
-            insights.append(f"The primary execution path is {', then '.join(steps)}.")
-    if "cache" not in all_paths and not any("cache" in feature.lower() for feature in features):
-        insights.append("No obvious caching layer was detected, so repeated requests may depend directly on the main processing path.")
-    if not any(token in all_paths for token in ("auth", "jwt", "security", "permission", "login")):
-        insights.append("No obvious authentication or security boundary was detected in the prioritized modules.")
-    if not any(token in all_paths for token in ("test", "spec")):
-        insights.append("No clear test coverage surfaced in the prioritized files, which may slow safe iteration.")
-    if len(central_nodes) <= 1 and len(features) >= 3:
-        insights.append("Feature responsibilities may be tightly coupled, because multiple capabilities appear to converge on the same core module.")
-    if risks:
-        insights.append(f"The highest-risk areas currently appear to be {', '.join(risks[:2])}.")
-
-    return _dedupe(insights)[:8]
+) -> List[Dict[str, str]]:
+    return []
 
 
 def _compute_confidence(
@@ -168,6 +160,25 @@ def enrich_result_with_intelligence(
     )
     graph["entry_points"] = _extract_entry_points(sampled_files)
     insights = _build_insights(enriched, sampled_files, workflows, graph)
+    system_workflow: Dict[str, List[str]] = {
+        "initialization": [],
+        "request_flow": [],
+        "processing_flow": [],
+        "response_flow": [],
+    }
+    for workflow in workflows:
+        name = str(workflow.get("name", "")).lower()
+        summary = str(workflow.get("summary", "")).strip()
+        steps = _dedupe(workflow.get("steps", []))[:5]
+        detail = [summary] if summary else steps
+        if "initialization" in name and detail:
+            system_workflow["initialization"] = _ensure_step_list(detail)
+        elif "request" in name and detail:
+            system_workflow["request_flow"] = _ensure_step_list(detail)
+        elif ("processing" in name or "data" in name) and detail:
+            system_workflow["processing_flow"] = _ensure_step_list(detail)
+        elif "response" in name and detail:
+            system_workflow["response_flow"] = _ensure_step_list(detail)
     confidence_score, confidence_reasons = _compute_confidence(sampled_files, workflows, graph, enriched)
     behavior_signals = extract_behavior_signals(enriched, sampled_files)
     product_profile = infer_product_profile(
@@ -213,7 +224,7 @@ def enrich_result_with_intelligence(
     enriched["verification_confidence"] = str(verification.get("confidence", "")).strip()
     enriched["system_type"] = str(behavior_summary.get("system_type", enriched.get("system_type", ""))).strip()
     if verified_domain == "AI verification":
-        enriched["system_type"] = "AI-powered verification / hallucination detection system"
+        enriched["system_type"] = "verification and hallucination detection system"
     fact_sheet = extract_fact_sheet(result=enriched, sampled_files=sampled_files)
     enriched["fact_entry_points"] = list(fact_sheet.get("entry_points", []))
     enriched["fact_modules"] = list(fact_sheet.get("modules", []))
@@ -229,9 +240,21 @@ def enrich_result_with_intelligence(
     enriched["core_behavior"] = str(behavior_summary.get("core_behavior", "")).strip()
     enriched["key_capabilities"] = list(behavior_summary.get("key_capabilities", []))
     enriched["workflow_summary"] = str(behavior_summary.get("workflow_summary", "")).strip()
+    if not system_workflow or isinstance(system_workflow, str):
+        system_workflow = generate_inferred_workflow({"result": enriched, "workflows": workflows, "graph": graph})
+    else:
+        system_workflow = {
+            "initialization": _ensure_step_list(system_workflow.get("initialization")),
+            "request_flow": _ensure_step_list(system_workflow.get("request_flow")),
+            "processing_flow": _ensure_step_list(system_workflow.get("processing_flow")),
+            "response_flow": _ensure_step_list(system_workflow.get("response_flow")),
+        }
+    if not insights or isinstance(insights, str):
+        insights = generate_basic_insights({"result": enriched, "workflows": workflows, "graph": graph})
+    enriched["system_workflow"] = system_workflow
     enriched["workflows"] = workflows
     enriched["dependency_graph"] = graph
-    enriched["insights"] = insights or ["Using inferred insights from the analyzed structure, workflows, and dependencies."]
+    enriched["insights"] = insights
     enriched["confidence_score"] = confidence_score
     enriched["confidence_reasons"] = confidence_reasons
     return enriched

@@ -18,6 +18,7 @@ from app.db.models import (
     SessionType,
     SessionStatus,
     SummaryBlocks,
+    SystemWorkflow,
     UnifiedResult,
 )
 
@@ -200,6 +201,15 @@ class UnifiedResultResponse(BaseModel):
     """Unified analysis result returned by all session types."""
     type: SessionType
     session_id: str
+    overview: str = ""
+    project_type: str = ""
+    tech_stack: List[str] = []
+    folder_structure: List[dict] = []
+    core_modules: List[dict] = []
+    execution_flow: List[str] = []
+    dependencies: List[dict] = []
+    issues: List[str] = []
+    improvements: List[str] = []
     project_goal: str = ""
     architecture_style: str = ""
     domain: str = ""
@@ -218,22 +228,24 @@ class UnifiedResultResponse(BaseModel):
     fact_modules: List[str] = []
     fact_actions: List[str] = []
     fact_flow: str = ""
-    project_type: str = ""
     project_goal_confidence: str = ""
     key_modules: List[str] = []
     core_features: List[str] = []
     risks: List[str] = []
+    system_workflow: SystemWorkflow = Field(default_factory=SystemWorkflow)
     workflows: List[dict] = []
     dependency_graph: dict = {}
-    insights: List[str] = []
+    insights: List[dict] = []
     confidence_score: int = 0
     confidence_reasons: List[str] = []
     summary_blocks: SummaryBlocks = Field(default_factory=SummaryBlocks)
+    summary: dict = Field(default_factory=lambda: {"what": "", "why": ""})
 
 
 class SessionStatusResponse(BaseModel):
     """Returned when checking session status."""
     session_id: str
+    task_id: Optional[str] = None
     job_id: Optional[str] = None
     type: SessionType
     status: SessionStatus

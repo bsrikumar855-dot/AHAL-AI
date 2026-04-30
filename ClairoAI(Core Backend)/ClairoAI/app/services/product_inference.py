@@ -35,7 +35,7 @@ def _tokenize(text: str) -> List[str]:
 DOMAIN_RULES: list[dict[str, Any]] = [
     {
         "domain": "developer tools",
-        "system_type": "developer intelligence platform",
+        "system_type": "code analysis tool",
         "target_users": "software engineers, engineering teams, and technical leads",
         "tokens": {"repo", "repository", "code", "analysis", "workflow", "module", "developer", "chat", "assistant", "architecture"},
         "purpose": "help engineering teams understand codebases, trace execution flow, and identify architectural risks faster",
@@ -171,7 +171,7 @@ def _analyst_value_props(
         or str(result.get("validated_domain", "")).strip().lower() == "ai verification"
     ):
         problem_statement = (
-            "An AI-powered verification and hallucination detection product that stops misinformation and untrusted AI output"
+            "A verification product that detects unsupported claims and untrusted generated output"
         )
         solution_statement = (
             "It extracts claims, validates them with external evidence, and scores reliability to deliver explainable truth assessments at scale"
@@ -184,7 +184,7 @@ def _analyst_value_props(
 
     if str(profile.get("domain", "")).strip().lower() == "developer tools":
         return (
-            f"A {system_type or 'developer intelligence platform'} that eliminates codebase complexity for {target_users}",
+            f"A {system_type or 'code analysis tool'} that reduces codebase complexity for {target_users}",
             "It converts opaque software behavior into clear execution insight, accelerating debugging, architecture reviews, and technical decisions",
         )
 
@@ -719,7 +719,7 @@ def build_project_goal(
 
     if domain_theme == "verification_system":
         goal = (
-            "An AI-powered verification system designed to analyze information, extract claims, and validate them against supporting evidence. "
+            "A verification system designed to analyze information, extract claims, and validate them against supporting evidence. "
             f"It follows {flow}, helping turn uncertain inputs into explainable verification outcomes."
         )
     elif domain_theme == "biology_education_platform":
@@ -778,7 +778,7 @@ def build_project_goal(
     elif project_type == "full_product_platform":
         module_fragment = ", ".join(modules[:3]) if modules else "multiple coordinated components"
         goal = (
-            f"A comprehensive platform that coordinates {module_fragment} to manage a multi-stage software workflow. "
+            f"A software platform that connects {module_fragment} to manage a multi-stage workflow. "
             f"It follows {flow}, indicating a layered product architecture with processing, persistence, and delivery responsibilities."
         )
     else:

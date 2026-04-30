@@ -93,9 +93,14 @@ class ChatContextSyncResponse(BaseModel):
     },
 )
 async def ask_question(request: ChatAskRequest):
-    logger.info(f"Chat question received: {request.question[:80]}...")
-    print(f"[CHAT API] Question: {request.question[:100]}")
-    print(f"[CHAT API] session_id={request.session_id}, mode={request.mode}")
+    logger.info(
+        "Chat question received",
+        extra={"extra_data": {
+            "question_length": len(request.question),
+            "session_id": request.session_id,
+            "mode": request.mode,
+        }},
+    )
 
     try:
         result = await chat_ask(
@@ -115,11 +120,10 @@ async def ask_question(request: ChatAskRequest):
 
     except Exception as e:
         logger.error(f"Chat endpoint failed: {e}")
-        print(f"[CHAT API] ERROR: {e}")
         raise HTTPException(
             status_code=500,
             detail={
-                "error": "A grounded response is still being refined. Please try again in a moment.",
+                "error": "A grounded response is still being refined.",
                 "details": str(e),
             },
         )
@@ -160,7 +164,7 @@ async def chat_history(
         raise HTTPException(
             status_code=500,
             detail={
-                "error": "Chat history is still syncing. Please try again in a moment.",
+                "error": "Chat history is still syncing.",
                 "details": str(e),
             },
         )
@@ -194,7 +198,7 @@ async def sync_chat_context(request: ChatContextSyncRequest):
         raise HTTPException(
             status_code=500,
             detail={
-                "error": "Live chat context is still syncing. Please try again in a moment.",
+                "error": "Live chat context is still syncing.",
                 "details": str(e),
             },
         )

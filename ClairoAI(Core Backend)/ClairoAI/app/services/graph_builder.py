@@ -6,13 +6,13 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from typing import Any, Dict, Iterable, List
 
-_IMPORT_RE = re.compile(r"^\s*(?:from\s+([A-Za-z0-9_\.]+)\s+import\s+([A-Za-z0-9_,\s\*]+)|import\s+([A-Za-z0-9_\.,\s]+))", re.MULTILINE)
-_JS_IMPORT_RE = re.compile(r'^\s*import\s+(?:.+?\s+from\s+)?["\']([^"\']+)["\']', re.MULTILINE)
-_CALL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
-_FUNCTION_RE = re.compile(r"^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.MULTILINE)
-_JS_FUNCTION_RE = re.compile(r"\b(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(|\bconst\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:async\s*)?\(", re.MULTILINE)
+_IMPORT_RE = re.compile(r"^\s*(?:from\s+([A-Za-z0-9_\.]+)\s+import\s+([A-Za-z0-9_,\s\*]+)|import\s+([A-Za-z0-9_\.,\s]+))")
+_JS_IMPORT_RE = re.compile(r'^\s*import\s+(?:.+?\s+from\s+)?["\']([^"\']+)["\']')
+_MAX_IMPORT_SCAN_LINES = 220
+_GRAPH_TIMEOUT_SECONDS = 4.0
 
 
 def _dedupe(items: Iterable[str]) -> List[str]:
@@ -32,24 +32,27 @@ def _module_name(path: str) -> str:
     return os.path.splitext(basename)[0] or basename or "module"
 
 
-def _extract_function_names(content: str) -> List[str]:
-    js_names: List[str] = []
-    for first, second in _JS_FUNCTION_RE.findall(content or ""):
-        if first:
-            js_names.append(first)
-        elif second:
-            js_names.append(second)
-    return _dedupe(list(_FUNCTION_RE.findall(content or "")) + js_names)[:40]
-
-
 def _extract_dependency_targets(content: str) -> List[str]:
     targets: List[str] = []
-    for left, _from_names, import_names in _IMPORT_RE.findall(content or ""):
-        if left:
-            targets.append(left.split(".")[-1])
-        elif import_names:
-            targets.extend(item.strip().split(".")[-1] for item in import_names.split(",") if item.strip())
-    targets.extend(item.split("/")[-1].split(".")[0] for item in _JS_IMPORT_RE.findall(content or ""))
+    for line in (content or "").splitlines()[:_MAX_IMPORT_SCAN_LINES]:
+        stripped = line.lstrip()
+        if not (
+            stripped.startswith("import ")
+            or stripped.startswith("from ")
+            or " import " in stripped
+        ):
+            continue
+        match = _IMPORT_RE.match(line)
+        if match:
+            left, _from_names, import_names = match.groups()
+            if left:
+                targets.append(left.split(".")[-1])
+            elif import_names:
+                targets.extend(item.strip().split(".")[-1] for item in import_names.split(",") if item.strip())
+            continue
+        js_match = _JS_IMPORT_RE.match(line)
+        if js_match:
+            targets.append(js_match.group(1).split("/")[-1].split(".")[0])
     return _dedupe(targets)[:20]
 
 
@@ -59,13 +62,9 @@ def build_relationship_graph(
     sampled_files: List[Dict[str, str]],
     workflows: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    started = time.monotonic()
     nodes: List[Dict[str, str]] = []
     edges: List[Dict[str, str]] = []
-    known_functions = _dedupe(
-        name
-        for file_info in sampled_files
-        for name in _extract_function_names(str(file_info.get("content", "") or ""))
-    )
     dependency_map: Dict[str, List[str]] = {}
     centrality: Dict[str, int] = {}
 
@@ -94,6 +93,18 @@ def build_relationship_graph(
         return "supporting"
 
     for file_info in sampled_files[:20]:
+        if time.monotonic() - started > _GRAPH_TIMEOUT_SECONDS:
+            return {
+                "session_type": session_type,
+                "dependencies": {},
+                "central_nodes": [],
+                "nodes": [],
+                "edges": [],
+                "summary": f"Dependency scan timed out for the analyzed {session_type} system.",
+                "confidence": "low",
+                "confidence_percent": 0,
+                "uncertainty_reasons": ["Dependency scan timed out and was skipped to avoid blocking analysis"],
+            }
         path = str(file_info.get("path", "") or "")
         content = str(file_info.get("content", "") or "")
         module = _module_name(path)
@@ -107,16 +118,6 @@ def build_relationship_graph(
         for imported_module in imported_modules:
             add_node(imported_module, "module", imported_module)
             add_edge(module, imported_module, "imports")
-
-        for function_name in _extract_function_names(content):
-            function_node = f"{module}.{function_name}"
-            add_node(function_node, "function", function_name)
-            add_edge(module, function_node, "defines")
-            body_calls = [name for name in _CALL_RE.findall(content) if name in known_functions and name != function_name]
-            for call in _dedupe(body_calls)[:8]:
-                target = next((f"{_module_name(item.get('path', ''))}.{call}" for item in sampled_files if re.search(rf"^\s*(?:async\s+)?def\s+{re.escape(call)}\s*\(", str(item.get("content", "") or ""), re.MULTILINE)), call)
-                add_node(target, "function", call)
-                add_edge(function_node, target, "calls")
         centrality[module] = max(importance, centrality.get(module, 0))
 
     for workflow in workflows[:10]:
@@ -154,7 +155,7 @@ def build_relationship_graph(
         "central_nodes": central_nodes,
         "nodes": ranked_nodes[:120],
         "edges": edges[:220],
-        "summary": f"Graph captures directed module, file, function, and workflow dependencies for the analyzed {session_type} system.",
+        "summary": f"Graph captures directed module, file, and workflow import dependencies for the analyzed {session_type} system.",
         "confidence": "high" if len(edges) >= 6 else "medium",
         "confidence_percent": 86 if len(edges) >= 8 else 68,
         "uncertainty_reasons": [] if len(edges) >= 8 else ["Dependency importance is inferred from sampled files and import relationships"],

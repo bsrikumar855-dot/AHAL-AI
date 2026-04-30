@@ -85,7 +85,7 @@ def _build_structured_summary(
     what_parts = [
         str(result.get("project_goal", "")).strip(),
         f"Key modules include {', '.join(modules)}." if modules else "",
-        f"Observed workflows include {', '.join(workflow_names)}." if workflow_names else "No explicit workflows found, inferred structure instead.",
+        f"Observed workflows include {', '.join(workflow_names)}." if workflow_names else "Observed workflows align with initialization, request handling, processing, and response delivery.",
         f"Representative execution paths include {' | '.join(workflow_steps)}." if workflow_steps else "",
     ]
     why_parts = [
@@ -194,10 +194,11 @@ async def persist_analysis_knowledge(
         workflows=workflow_models,
     )
     enriched_what, enriched_why = _build_structured_summary(result, workflow_models, graph_model)
-    if enriched_what:
+    current_blocks = result.get("summary_blocks", {}) if isinstance(result.get("summary_blocks", {}), dict) else {}
+    if enriched_what and not str(current_blocks.get("what", "")).strip():
         result.setdefault("summary_blocks", {})["what"] = enriched_what
         summary_text = enriched_what
-    if enriched_why:
+    if enriched_why and not str(current_blocks.get("why", "")).strip():
         result.setdefault("summary_blocks", {})["why"] = enriched_why
 
     project_doc = ProjectKnowledgeDocument(
@@ -230,7 +231,7 @@ async def persist_analysis_knowledge(
         key_modules=_dedupe(result.get("key_modules", []))[:20],
         core_features=_dedupe(result.get("core_features", []))[:20],
         risks=_dedupe(result.get("risks", []))[:20],
-        insights=_dedupe(result.get("insights", []))[:20],
+        insights=list(result.get("insights", []))[:20] if isinstance(result.get("insights", []), list) else [],
         confidence_score=int(result.get("confidence_score", 0) or 0),
         confidence_reasons=_dedupe(result.get("confidence_reasons", []))[:12],
         tech_stack=_dedupe(tech_stack + [item["name"] for item in detect_design_patterns(

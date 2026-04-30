@@ -2,10 +2,12 @@
 
 import asyncio
 import hashlib
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db.mongodb import mongodb
 from app.services.chat_prompt_builder import build_chat_prompt
@@ -16,11 +18,24 @@ from app.services.llm_handler import generate_chat_response_async
 
 logger = get_logger("services.chat")
 
-_CHAT_TIMEOUT_SECONDS = 60
+_CHAT_TIMEOUT_SECONDS = 30
 _SHORT_MEMORY_LIMIT = 3
 _DEFAULT_LLM_MODE = "online"
-_CHAT_CACHE_TTL_SECONDS = 600
 _CHAT_RESPONSE_CACHE: dict[str, tuple[float, Dict[str, Any]]] = {}
+_BANNED_CHAT_PHRASES = (
+    "i am grounding this answer",
+    "based on the provided context",
+    "based on the latest analyzed project context",
+    "refining the deeper answer",
+    "analyzing",
+    "from the system",
+)
+_SENSITIVE_PATTERNS = (
+    re.compile(r"\b[A-Za-z]:\\[^\s,;]+"),
+    re.compile(r"(?<!\w)/(?:home|users|var|etc|app|tmp)/[^\s,;]+", re.IGNORECASE),
+    re.compile(r"\b[\w.-]*\.env(?:\.[\w.-]+)?\b", re.IGNORECASE),
+    re.compile(r"\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+", re.IGNORECASE),
+)
 
 
 def _normalize_chat_mode(chat_mode: str | None) -> str:
@@ -42,11 +57,22 @@ def _clean_list(values: list[Any], limit: int = 10) -> list[str]:
     return cleaned
 
 
-def _build_cache_key(session_id: str, chat_mode: str, question: str, structured: Dict[str, Any]) -> str:
+def _build_cache_key(
+    session_id: str,
+    chat_mode: str,
+    question: str,
+    structured: Dict[str, Any],
+    recent_history: list[Dict[str, Any]],
+) -> str:
+    history_signature = "|".join(
+        f"{item.get('question', '')}:{item.get('answer', '')}"
+        for item in recent_history[-_SHORT_MEMORY_LIMIT:]
+    )
     signature = "|".join([
         session_id,
         chat_mode,
         " ".join(question.strip().lower().split()),
+        history_signature,
         structured.get("project_goal", ""),
         structured.get("architecture_style", ""),
         "|".join(structured.get("key_modules", [])[:6]),
@@ -57,6 +83,10 @@ def _build_cache_key(session_id: str, chat_mode: str, question: str, structured:
 
 
 def _get_cached_response(cache_key: str) -> Dict[str, Any] | None:
+    settings = get_settings()
+    if not settings.CHAT_CACHE_ENABLED:
+        return None
+
     cached = _CHAT_RESPONSE_CACHE.get(cache_key)
     if not cached:
         return None
@@ -70,7 +100,15 @@ def _get_cached_response(cache_key: str) -> Dict[str, Any] | None:
 
 
 def _set_cached_response(cache_key: str, payload: Dict[str, Any]) -> None:
-    _CHAT_RESPONSE_CACHE[cache_key] = (time.time() + _CHAT_CACHE_TTL_SECONDS, dict(payload))
+    settings = get_settings()
+    if not settings.CHAT_CACHE_ENABLED:
+        return
+
+    ttl_seconds = max(0, int(settings.CHAT_CACHE_TTL_SECONDS))
+    if ttl_seconds == 0:
+        return
+
+    _CHAT_RESPONSE_CACHE[cache_key] = (time.time() + ttl_seconds, dict(payload))
 
     if len(_CHAT_RESPONSE_CACHE) > 256:
         oldest_key = min(_CHAT_RESPONSE_CACHE, key=lambda key: _CHAT_RESPONSE_CACHE[key][0])
@@ -98,6 +136,32 @@ def _build_suggested_questions(chat_mode: str, modules: list[str], workflows: li
     return _clean_list(suggestions, 5)
 
 
+def _sanitize_chat_answer(answer: str) -> str:
+    text = str(answer or "").strip()
+    if not text:
+        return ""
+
+    for pattern in _SENSITIVE_PATTERNS:
+        text = pattern.sub("[redacted]", text)
+
+    filtered_lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        lowered = line.lower()
+        if any(phrase in lowered for phrase in _BANNED_CHAT_PHRASES):
+            continue
+        if lowered in {"summary", "developer explanation", "architect explanation"}:
+            continue
+        filtered_lines.append(line)
+
+    if not filtered_lines:
+        return ""
+
+    return "\n".join(filtered_lines[:4])
+
+
 def _fallback_chat_response(question: str, chat_mode: str, structured: Dict[str, Any], session_id: str) -> Dict[str, Any]:
     modules = _clean_list(structured.get("key_modules", []), 6)
     features = _clean_list(structured.get("core_features", []), 5)
@@ -117,31 +181,34 @@ def _fallback_chat_response(question: str, chat_mode: str, structured: Dict[str,
     elif "feature" in lowered_question or "what does" in lowered_question:
         focus = "implemented capabilities and likely user-facing behavior"
 
-    sections: list[str] = [
-        "Based on the latest analyzed project context, here is the best grounded explanation.",
-        f"The project appears to be centered on {goal or 'the analyzed application workflow'}, with a {architecture or chat_mode + ' oriented structure'}."
-    ]
+    bullets: list[str] = []
+    if goal:
+        bullets.append(f"Main focus: {goal}")
+    elif architecture:
+        bullets.append(f"Structure: {architecture}")
+    elif summary:
+        bullets.append(summary)
+    elif modules:
+        bullets.append(f"Key parts: {', '.join(modules[:3])}")
+    else:
+        bullets.append(f"This looks focused on {focus}.")
 
-    if summary:
-        sections.append(summary)
-    if modules:
-        sections.append(f"The most important modules in this context are {', '.join(modules)}, which suggests the system organizes {focus}.")
     if features:
-        sections.append(f"Key implemented capabilities include {', '.join(features)}.")
+        bullets.append(f"Main behavior: {', '.join(features[:3])}")
     if risks or issues:
         combined = risks + [item for item in issues if item not in risks]
-        sections.append(f"Important caveats to keep in mind are {', '.join(combined[:4])}.")
-    if remaining:
-        sections.append(f"Open work or likely next improvements include {', '.join(remaining)}.")
+        bullets.append(f"Main risk: {', '.join(combined[:3])}")
+    elif remaining:
+        bullets.append(f"Next step: {remaining[0]}")
 
-    answer = "\n\n".join(sections).strip()
+    answer = _sanitize_chat_answer("\n".join(bullets))
     return {
         "answer": answer,
         "source": chat_mode,
         "related_files": _clean_list(structured.get("related_files", []), 6),
         "modules_involved": modules,
         "session_id": session_id,
-        "suggested_questions": _build_suggested_questions(chat_mode, modules, reasoning.get("relevant_workflows", [])),
+        "suggested_questions": _build_suggested_questions(chat_mode, modules, []),
     }
 
 
@@ -160,25 +227,28 @@ def _knowledge_first_fallback(
         8,
     )
 
-    parts = [
-        f"Summary: {str(explanations.get('summary', '')).strip() or str(structured.get('summary', '')).strip() or 'The analyzed system is grounded in the stored project knowledge.'}",
-        f"Developer Explanation: {str(explanations.get('developer', '')).strip() or 'The developer-facing explanation is based on the stored modules and workflows.'}",
-        f"Architect Explanation: {str(explanations.get('architect', '')).strip() or 'The architect-facing explanation is based on the detected architecture and dependency relationships.'}",
-    ]
-    if workflows:
-        workflow_steps = []
-        for workflow in workflows[:2]:
-            name = workflow.get("name", "Primary Flow")
-            steps = " -> ".join(_clean_list(workflow.get("steps", []), 8))
-            workflow_steps.append(f"{name}: {steps}")
-        if workflow_steps:
-            parts.append("Workflow Details: " + " | ".join(workflow_steps))
-    if graph_paths:
-        parts.append("Relationship Paths: " + " | ".join(graph_paths[:4]))
-    if modules:
-        parts.append("Modules Involved: " + ", ".join(modules))
+    parts: list[str] = []
+    summary = str(explanations.get("summary", "")).strip() or str(structured.get("summary", "")).strip()
+    developer = str(explanations.get("developer", "")).strip()
+    architect = str(explanations.get("architect", "")).strip()
 
-    answer = "\n\n".join(parts)
+    if summary:
+        parts.append(summary)
+    if developer:
+        parts.append(developer)
+    elif modules:
+        parts.append(f"Key parts: {', '.join(modules[:3])}")
+    if architect:
+        parts.append(architect)
+    elif graph_paths:
+        parts.append(f"Main flow: {graph_paths[0]}")
+    elif workflows:
+        first = workflows[0]
+        steps = " -> ".join(_clean_list(first.get("steps", []), 4))
+        if steps:
+            parts.append(f"Flow: {steps}")
+
+    answer = _sanitize_chat_answer("\n".join(parts))
     return {
         "answer": answer,
         "source": chat_mode,
@@ -196,36 +266,31 @@ async def chat_ask(
     """Handle a conversational request with full grounding and memory."""
     started = time.monotonic()
     chat_mode = _normalize_chat_mode(mode)
-    
-    print(f"\n[CHAT] REQUEST: mode={chat_mode} session={session_id}")
-    print(f"[CHAT] QUESTION: {question}")
+    requested_session_id = str(session_id or "").strip()
 
-    # 1. Load context from session or latest analysis
-    context_data = await build_chat_context(session_id=session_id, chat_mode=chat_mode)
+    if not requested_session_id:
+        raise ValueError("Session ID is required")
+
+    # 1. Load context from the requested session only
+    context_data = await build_chat_context(session_id=requested_session_id, chat_mode=chat_mode)
     context_string = context_data.get("context_string", "")
     structured = context_data.get("structured", {})
-    resolved_session_id = str(context_data.get("session_id", session_id or ""))
-    reasoning = await build_reasoning_context(resolved_session_id, question, chat_mode) if resolved_session_id else {
-        "intent": detect_question_intent(question, chat_mode),
-        "relevant_modules": [],
-        "relevant_workflows": [],
-        "graph_paths": [],
-        "explanations": {},
-        "context_string": "",
-    }
+    resolved_session_id = str(context_data.get("session_id", requested_session_id))
+    if not resolved_session_id or resolved_session_id != requested_session_id:
+        raise ValueError("Session ID is required")
+
+    reasoning = await build_reasoning_context(resolved_session_id, question, chat_mode)
 
     if not context_string:
-        print("[CHAT] No stored analysis context found for this request.")
-        context_string = "No stored analysis context was found. Answer with the best engineering guidance possible and clearly infer from the question."
+        raise ValueError("No stored analysis context found for this session")
 
     # 2. Get recent history for memory
     history = await get_chat_history(resolved_session_id, chat_mode=chat_mode, limit=_SHORT_MEMORY_LIMIT)
     history_tail = history[-_SHORT_MEMORY_LIMIT:]
-    cache_key = _build_cache_key(resolved_session_id, chat_mode, question, structured)
+    cache_key = _build_cache_key(resolved_session_id, chat_mode, question, structured, history_tail)
     cached = _get_cached_response(cache_key)
     if cached:
         cached["session_id"] = resolved_session_id
-        print("[CHAT] Cache hit")
         return cached
 
     # 3. Build the technical grounding prompt
@@ -237,9 +302,6 @@ async def chat_ask(
         recent_history=history_tail,
         reasoning_context=reasoning,
     )
-
-    print(f"[CHAT] DEBUG - PROMPT (first 500 chars):\n{prompt[:500]}...")
-    print("[CHAT] STATUS: Thinking...")
 
     # 4. Generate LLM response (Raw Text)
     try:
@@ -255,14 +317,11 @@ async def chat_ask(
         if not response_text or not response_text.strip():
             raise ValueError("Empty LLM response")
 
-        print(f"[CHAT] DEBUG - LLM RESPONSE:\n{response_text[:300]}...")
-
-        # metadata extrapolation from grounding
         related_files = _clean_list(structured.get("related_files", []), 6)
         modules_involved = _clean_list(structured.get("key_modules", []), 6)
 
         result = {
-            "answer": response_text.strip(),
+            "answer": _sanitize_chat_answer(response_text.strip()) or _sanitize_chat_answer(_knowledge_first_fallback(question, chat_mode, structured, reasoning, resolved_session_id)["answer"]),
             "source": chat_mode,
             "related_files": related_files,
             "modules_involved": modules_involved,
@@ -273,12 +332,11 @@ async def chat_ask(
 
     except Exception as e:
         logger.error(f"Chat execution failed, serving fallback: {e}")
-        print(f"[CHAT] STATUS: Analyzing deeply, this may take a few seconds...")
         result = _knowledge_first_fallback(question, chat_mode, structured, reasoning, resolved_session_id)
         _set_cached_response(cache_key, result)
 
     elapsed_ms = round((time.monotonic() - started) * 1000, 2)
-    print(f"[CHAT] COMPLETED in {elapsed_ms}ms\n")
+    logger.info(f"Chat completed in {elapsed_ms}ms")
 
     # 5. Persistent history
     await _store_chat_history(resolved_session_id, question, result["answer"], chat_mode)

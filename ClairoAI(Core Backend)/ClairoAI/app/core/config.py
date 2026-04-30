@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"
+    CORS_ALLOWED_ORIGINS: str = Field(
+        default="http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173",
+        description="Comma-separated browser origins allowed to call the API",
+    )
 
     # ── MongoDB ──────────────────────────────────────────────────
     MONGODB_URL: str = Field(
@@ -67,16 +71,24 @@ class Settings(BaseSettings):
         description="LLM temperature (0 = deterministic output)",
     )
     LLM_TIMEOUT_SECONDS: int = Field(
-        default=60,
+        default=30,
         description="Timeout for a single LLM call",
     )
     LLM_MAX_RETRIES: int = Field(
-        default=2,
+        default=1,
         description="Number of retries on LLM failure",
     )
     LLM_MAX_RESPONSE_TOKENS: int = Field(
-        default=2048,
+        default=500,
         description="Maximum tokens requested from Ollama for structured output",
+    )
+    CHAT_CACHE_ENABLED: bool = Field(
+        default=True,
+        description="Enable short-lived in-process cache for repeated chat questions",
+    )
+    CHAT_CACHE_TTL_SECONDS: int = Field(
+        default=600,
+        description="Seconds to keep repeated chat answers in the in-process cache",
     )
 
     # ── File Uploads ─────────────────────────────────────────────
@@ -108,7 +120,7 @@ class Settings(BaseSettings):
     )
     RAG_CIRCUIT_BREAKER_COOLDOWN: int = Field(
         default=60,
-        description="Seconds to wait before retrying RAG after circuit break",
+        description="Seconds to wait before probing retrieval after circuit break",
     )
 
     # ── Processing ───────────────────────────────────────────────
@@ -143,8 +155,4 @@ class Settings(BaseSettings):
 @lru_cache()
 def get_settings() -> Settings:
     """Return cached singleton Settings instance."""
-    settings = Settings()
-    print(f"GEMINI KEY: {settings.GEMINI_API_KEY[:8]}..." if settings.GEMINI_API_KEY else "GEMINI KEY: NOT SET")
-    print(f"ONLINE_ONLY: {settings.ONLINE_ONLY}")
-    print(f"LLM_MODE: {settings.LLM_MODE}")
-    return settings
+    return Settings()

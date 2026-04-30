@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ChevronLeft,
@@ -24,15 +23,21 @@ const navItems = [
   { href: "/dashboard/history", label: "History", icon: History },
 ];
 
-export function Sidebar() {
+const SIDEBAR_TRANSITION = { duration: 0.3, ease: [0.22, 1, 0.36, 1] as const };
+
+interface SidebarProps {
+  collapsed: boolean;
+  onToggle: () => void;
+}
+
+export function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const pathname = usePathname();
-  const [collapsed, setCollapsed] = useState(false);
 
   return (
     <motion.aside
       animate={{ width: collapsed ? 72 : 260 }}
-      transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-      className="fixed left-0 top-0 bottom-0 z-40 flex flex-col glass-card border-r border-white/5"
+      transition={SIDEBAR_TRANSITION}
+      className="fixed left-0 top-0 bottom-0 z-40 flex flex-col overflow-hidden glass-card border-r border-white/5"
     >
       <div className="flex h-16 items-center gap-3 border-b border-white/5 px-5">
         <AnimatePresence>
@@ -63,55 +68,57 @@ export function Sidebar() {
         ) : null}
       </div>
 
-      <nav className="flex-1 space-y-1 px-3 py-4">
-        {navItems.map((item) => {
-          const isActive =
-            item.href === "/dashboard"
-              ? pathname === "/dashboard"
-              : pathname.startsWith(item.href);
+      <div className="flex-1 overflow-y-auto px-3 py-4 pr-2 [scrollbar-gutter:stable]">
+        <nav className="space-y-1 rounded-xl">
+          {navItems.map((item) => {
+            const isActive =
+              item.href === "/dashboard"
+                ? pathname === "/dashboard"
+                : pathname.startsWith(item.href);
 
-          return (
-            <Link key={item.href} href={item.href}>
-              <div
-                className={cn(
-                  "group relative flex items-center gap-3 rounded-lg px-3 py-2.5 transition-all duration-200",
-                  isActive
-                    ? "bg-violet-500/10 text-violet-400"
-                    : "text-slate-400 hover:bg-white/5 hover:text-slate-200"
-                )}
-              >
-                {isActive && (
-                  <motion.div
-                    layoutId="sidebar-active"
-                    className="absolute left-0 top-1/2 h-6 w-[3px] -translate-y-1/2 rounded-r-full bg-violet-500"
-                    transition={{ type: "spring", stiffness: 300, damping: 30 }}
-                  />
-                )}
-                <item.icon
-                  className={cn("h-5 w-5 flex-shrink-0", isActive && "text-violet-400")}
-                />
-                <AnimatePresence>
-                  {!collapsed && (
-                    <motion.span
-                      initial={{ opacity: 0, width: 0 }}
-                      animate={{ opacity: 1, width: "auto" }}
-                      exit={{ opacity: 0, width: 0 }}
-                      transition={{ duration: 0.2 }}
-                      className="overflow-hidden whitespace-nowrap text-sm font-medium"
-                    >
-                      {item.label}
-                    </motion.span>
+            return (
+              <Link key={item.href} href={item.href}>
+                <div
+                  className={cn(
+                    "group relative flex w-full items-center gap-3 rounded-lg px-3 py-2.5 transition-all duration-200",
+                    isActive
+                      ? "bg-violet-500/10 text-violet-400"
+                      : "text-slate-400 hover:bg-white/5 hover:text-slate-200"
                   )}
-                </AnimatePresence>
-              </div>
-            </Link>
-          );
-        })}
-      </nav>
+                >
+                  {isActive && (
+                    <motion.div
+                      layoutId="sidebar-active"
+                      className="absolute left-0 top-1 bottom-1 w-[3px] rounded-r-full bg-violet-500"
+                      transition={{ type: "spring", stiffness: 300, damping: 30 }}
+                    />
+                  )}
+                  <item.icon
+                    className={cn("h-5 w-5 flex-shrink-0", isActive && "text-violet-400")}
+                  />
+                  <AnimatePresence>
+                    {!collapsed && (
+                      <motion.span
+                        initial={{ opacity: 0, width: 0 }}
+                        animate={{ opacity: 1, width: "auto" }}
+                        exit={{ opacity: 0, width: 0 }}
+                        transition={{ duration: 0.2 }}
+                        className="overflow-hidden whitespace-nowrap text-sm font-medium"
+                      >
+                        {item.label}
+                      </motion.span>
+                    )}
+                  </AnimatePresence>
+                </div>
+              </Link>
+            );
+          })}
+        </nav>
+      </div>
 
       <div className="border-t border-white/5 px-3 py-4">
         <button
-          onClick={() => setCollapsed(!collapsed)}
+          onClick={onToggle}
           className="flex w-full items-center justify-center rounded-lg py-2 text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-200"
         >
           <motion.div

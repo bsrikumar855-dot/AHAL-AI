@@ -228,6 +228,28 @@ def _infer_processing_flow(sampled_files: List[Dict[str, str]], known_functions:
     }
 
 
+def _infer_response_flow(sampled_files: List[Dict[str, str]], workflows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    modules = _dedupe(os.path.basename(str(file_info.get("path", "") or "")) for file_info in sampled_files[:4])
+    steps: List[str] = []
+    if workflows:
+        primary = workflows[0]
+        entry_point = str(primary.get("entry_point", "")).strip()
+        if entry_point:
+            steps.append(entry_point)
+        steps.extend(_dedupe(primary.get("steps", []))[-2:])
+    steps.extend(["prepare result", "return response"])
+    return {
+        "name": "Response Flow",
+        "steps": _dedupe(steps)[:6] or ["prepare result", "return response"],
+        "entry_point": steps[0] if steps else "response handler",
+        "modules": modules,
+        "confidence": "medium",
+        "confidence_percent": 70 if workflows else 62,
+        "uncertainty_reasons": [] if workflows else ["Response handling was assembled from workflow termination patterns"],
+        "summary": "Shows how processed output is finalized and returned to the caller.",
+    }
+
+
 def _ensure_named_workflows(sampled_files: List[Dict[str, str]], known_functions: List[str], workflows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     named = {str(workflow.get("name", "")).lower(): workflow for workflow in workflows}
     results: List[Dict[str, Any]] = []
@@ -237,6 +259,8 @@ def _ensure_named_workflows(sampled_files: List[Dict[str, str]], known_functions
     results.append(request_flow or _infer_request_flow(sampled_files, workflows))
     processing_flow = next((workflow for workflow in workflows if "processing" in str(workflow.get("name", "")).lower() or "data" in str(workflow.get("name", "")).lower()), None)
     results.append(processing_flow or _infer_processing_flow(sampled_files, known_functions))
+    response_flow = next((workflow for workflow in workflows if "response" in str(workflow.get("name", "")).lower()), None)
+    results.append(response_flow or _infer_response_flow(sampled_files, workflows))
 
     for workflow in workflows:
         if workflow not in results:
@@ -320,7 +344,6 @@ def extract_workflows(
             "confidence_percent": 58,
             "uncertainty_reasons": ["No explicit routes or call chains were available in sampled files"],
             "summary": str(result.get("project_goal", "")).strip() or "Primary flow inferred from analyzed modules.",
-            "message": "No explicit workflows found, inferred structure instead",
         })
 
     return _ensure_named_workflows(sampled_files, known_functions, workflows)

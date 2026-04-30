@@ -17,11 +17,10 @@ import { ResultSkeleton } from "@/components/ui/skeleton";
 import { useUpload } from "@/hooks/useUpload";
 
 const uploadStages = [
-  { label: "Uploading archive", threshold: 15 },
-  { label: "Extracting project files", threshold: 35 },
-  { label: "Analyzing project structure", threshold: 65 },
-  { label: "Mapping dependencies", threshold: 85 },
-  { label: "Preparing final insights", threshold: 100 },
+  { label: "uploading", threshold: 15 },
+  { label: "analyzing", threshold: 40 },
+  { label: "generating insights", threshold: 80 },
+  { label: "finalizing", threshold: 100 },
 ];
 
 export default function FolderUploadPage() {
@@ -30,12 +29,14 @@ export default function FolderUploadPage() {
     loading,
     error,
     progress,
+    stage,
     selectedFile,
     sessionId,
     upload,
     selectFile,
     reset,
   } = useUpload();
+  const stageLabel = stage || "uploading";
 
   const inputRef = useRef<HTMLInputElement>(null);
   const dropRef = useRef<HTMLDivElement>(null);
@@ -167,12 +168,12 @@ export default function FolderUploadPage() {
                   <motion.div
                     className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-violet-500"
                     initial={{ width: "0%" }}
-                    animate={{ width: `${progress}%` }}
+                    animate={{ width: `${Math.max(progress, 6)}%` }}
                     transition={{ duration: 0.3 }}
                   />
                 </div>
                 <p className="text-right text-xs text-slate-500">
-                  {Math.round(progress)}% - Analyzing project structure...
+                  {Math.round(progress)}% - {stageLabel}
                 </p>
                 <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3">
                   <p className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
@@ -180,7 +181,7 @@ export default function FolderUploadPage() {
                   </p>
                   <div className="space-y-2">
                     {uploadStages.map((stage, index) => {
-                      const isComplete = progress >= stage.threshold;
+                      const isComplete = progress >= stage.threshold || (!!result && index === uploadStages.length - 1);
                       const isCurrent =
                         progress < stage.threshold &&
                         (index === 0 ||
@@ -278,7 +279,7 @@ export default function FolderUploadPage() {
         >
           <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0 text-amber-400" />
           <div>
-            <p className="text-sm font-medium text-amber-200">Partial analysis completed</p>
+            <p className="text-sm font-medium text-amber-200">Analysis failed</p>
             <p className="mt-0.5 text-xs text-amber-200/70">{error}</p>
           </div>
         </motion.div>

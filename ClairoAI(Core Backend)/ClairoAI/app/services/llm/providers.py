@@ -14,6 +14,8 @@ logger = get_logger("services.llm.providers")
 
 _PROVIDER_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 _DEFAULT_GEMINI_MODEL = "gemma-4-26b-a4b-it"
+_GEMINI_MIN_TIMEOUT_SECONDS = 5.0
+_GEMINI_MAX_TIMEOUT_SECONDS = 90.0
 
 
 class BaseLLMProvider(ABC):
@@ -74,7 +76,7 @@ class GeminiProvider(BaseLLMProvider):
         self.settings = get_settings()
         self.api_key = str(self.settings.GEMINI_API_KEY or "").strip()
         self.model = _DEFAULT_GEMINI_MODEL
-        self.timeout_seconds = 90.0
+        self.timeout_seconds = _GEMINI_MAX_TIMEOUT_SECONDS
 
     def _is_api_key_valid(self) -> bool:
         if not self.api_key:
@@ -86,7 +88,7 @@ class GeminiProvider(BaseLLMProvider):
     def generate(self, prompt: str, timeout: int | float | None = None) -> str | None:
         self._is_api_key_valid()
 
-        effective_timeout = min(90.0, max(10.0, float(timeout or self.timeout_seconds)))
+        effective_timeout = min(_GEMINI_MAX_TIMEOUT_SECONDS, max(_GEMINI_MIN_TIMEOUT_SECONDS, float(timeout or self.timeout_seconds)))
         started = time.monotonic()
 
         def _call_genai() -> Any:
@@ -95,23 +97,35 @@ class GeminiProvider(BaseLLMProvider):
             client = genai.Client(api_key=self.api_key)
             logger.info(
                 "Gemini initialized",
-                extra={"extra_data": {"key_prefix": self.api_key[:8]}},
+                extra={"extra_data": {"provider": "gemini", "prompt_length": len(prompt)}},
             )
-            print("Gemini API Key Loaded:", bool(self.api_key))
-            print("Prompt length:", len(prompt))
 
             try:
                 response = client.models.generate_content(
                     model="gemma-4-26b-a4b-it",
                     contents=prompt,
-                    config={"temperature": 0},
+                    config={"temperature": 0, "max_output_tokens": self.settings.LLM_MAX_RESPONSE_TOKENS},
                 )
             except Exception as exc:
                 raise Exception(f"Gemini API call failed: {str(exc)}") from exc
 
-            text = response.text
-            print("Raw response:", response)
-            print("Response text:", text)
+            text = ""
+            try:
+                candidates = getattr(response, "candidates", None) or []
+                if candidates:
+                    first_candidate = candidates[0]
+                    content = getattr(first_candidate, "content", None)
+                    parts = getattr(content, "parts", None) or []
+                    if parts:
+                        text = str(getattr(parts[0], "text", "") or "").strip()
+            except Exception as exc:
+                logger.warning(
+                    "Gemini structured text extraction failed",
+                    extra={"extra_data": {"provider": "gemini", "error": str(exc)}},
+                )
+
+            if not text:
+                text = str(getattr(response, "text", "") or "").strip()
 
             if not text or not text.strip():
                 raise Exception("Gemini returned empty response")
@@ -132,4 +146,4 @@ class GeminiProvider(BaseLLMProvider):
             return text
         except FutureTimeoutError as exc:
             future.cancel()
-            raise Exception(f"Gemini API failed: timed out after {effective_timeout:.1f}s") from exc
+            raise TimeoutError(f"Gemini API failed: timed out after {effective_timeout:.1f}s") from exc

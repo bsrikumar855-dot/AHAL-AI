@@ -305,7 +305,7 @@ export default function LandingPage() {
         >
           <div
             className="sticky w-full"
-            style={{ top: "15vh" }}
+            style={{ top: "8vh" }}
           >
             <div className="relative mx-auto w-full max-w-4xl px-6">
 
@@ -403,7 +403,7 @@ export default function LandingPage() {
           </div>
         </div>
 
-        <section className="px-6 pb-32">
+        <section className="px-6 pb-32 pt-[24rem] md:pt-[28rem] lg:pt-[32rem]">
           {/* Mobile Fallback Grid has been removed so only the animated cards show */}
 
           <LineDivider className="mt-12 w-full px-6" />

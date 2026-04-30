@@ -9,7 +9,8 @@ import { ResultSkeleton } from "@/components/ui/skeleton";
 
 export default function CodeAnalysisPage() {
   const [code, setCode] = useState("");
-  const { result, loading, error, sessionId, analyze, reset } = useAnalyze();
+  const { result, loading, error, sessionId, progress, stage, status, analyze, reset } = useAnalyze();
+  const stageLabel = stage || "uploading";
 
   const handleAnalyze = () => {
     if (code.trim().length < 10) return;
@@ -118,7 +119,7 @@ export default function CodeAnalysisPage() {
             {loading ? (
               <>
                 <div className="w-4 h-4 border-2 border-violet-300/30 border-t-violet-300 rounded-full animate-spin" />
-                Analyzing...
+                {stageLabel}
               </>
             ) : (
               <>
@@ -139,11 +140,37 @@ export default function CodeAnalysisPage() {
         >
           <AlertCircle className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
           <div>
-            <p className="text-sm font-medium text-amber-200">Partial analysis completed</p>
+            <p className="text-sm font-medium text-amber-200">Analysis failed</p>
             <p className="text-xs text-amber-200/70 mt-0.5">{error}</p>
           </div>
         </motion.div>
       )}
+
+      {loading || status === "processing" ? (
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="rounded-xl border border-violet-500/20 bg-violet-500/10 p-4"
+        >
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium text-violet-100">
+                {stageLabel}
+              </p>
+              <p className="mt-1 text-xs text-violet-200/75">
+                Polling progress every second
+              </p>
+            </div>
+            <p className="text-sm font-semibold text-violet-200">{progress}%</p>
+          </div>
+          <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-950/50">
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-violet-500 via-fuchsia-400 to-cyan-300 transition-all duration-500"
+              style={{ width: `${Math.max(progress, 6)}%` }}
+            />
+          </div>
+        </motion.div>
+      ) : null}
 
       {/* Loading Skeleton */}
       {!result && loading && <ResultSkeleton />}

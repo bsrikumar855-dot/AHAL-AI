@@ -5,6 +5,7 @@ Also exposes strict analysis-context helpers that only operate on uploaded
 project files and do not pull in any stored system context.
 """
 
+import os
 from typing import Any, Dict, Optional
 
 from app.core.logging import get_logger
@@ -14,7 +15,8 @@ from app.services.memory_service import get_memory_profile
 
 logger = get_logger("services.context_builder")
 
-MAX_CONTEXT_CHARS = 6000
+MAX_CONTEXT_CHARS = 3200
+MAX_CONTEXT_LINES_PER_FILE = 180
 CHAT_MODES = {"code", "folder", "repo"}
 BLOCKED_ANALYSIS_PATHS = [
     "app/",
@@ -56,33 +58,32 @@ def validate_analysis_files(files: list[dict[str, Any]]) -> None:
 def build_analysis_context(
     files: list[dict[str, Any]],
     *,
-    max_chars_per_file: int = 1500,
-    max_context_chars: int = 8000,
+    max_chars_per_file: int = 500,
+    max_context_chars: int = 3200,
 ) -> str:
     filtered_files = filter_analysis_files(files)
     validate_analysis_files(filtered_files)
 
-    print("=== FILES SENT TO LLM ===")
-    for file_info in filtered_files:
-        print(str(file_info.get("path", "")))
+    logger.debug(
+        "Prepared analysis context",
+        extra={"extra_data": {"file_count": len(filtered_files)}},
+    )
 
     parts: list[str] = []
     total = 0
     for file_info in filtered_files:
-        path = str(file_info.get("path", "")).strip()
+        path = os.path.basename(str(file_info.get("path", "")).replace("\\", "/").strip())
         content = str(file_info.get("content", "") or "")
         if not path or not content.strip():
             continue
+        line_count = int(file_info.get("line_count", 0) or 0)
+        if line_count > MAX_CONTEXT_LINES_PER_FILE:
+            continue
 
-        truncated = content
+        lines = content.splitlines()
+        truncated = "\n".join(lines[:MAX_CONTEXT_LINES_PER_FILE])
         if len(truncated) > max_chars_per_file:
-            head_size = max_chars_per_file * 2 // 3
-            tail_size = max_chars_per_file // 3
-            truncated = (
-                truncated[:head_size].rstrip()
-                + "\n...(middle trimmed)...\n"
-                + truncated[-tail_size:].lstrip()
-            )
+            truncated = truncated[:max_chars_per_file].rstrip() + "\n...(trimmed)..."
 
         snippet = f"=== FILE: {path} ===\n{truncated}"
         if total + len(snippet) > max_context_chars:
@@ -264,6 +265,8 @@ async def build_chat_context(
     """Build isolated chat context for a single mode."""
     if chat_mode not in CHAT_MODES:
         chat_mode = "code"
+    if not str(session_id or "").strip():
+        raise ValueError("Session ID is required")
 
     session = None
     if session_id:
@@ -272,58 +275,10 @@ async def build_chat_context(
             session = candidate
 
     if not session:
-        session = await _fetch_latest_session_by_type(chat_mode)
+        raise ValueError(f"Session '{session_id}' not found for mode '{chat_mode}'")
 
     if not session or not session.get("result"):
-        knowledge_only_session_id = str(session_id or "")
-        if knowledge_only_session_id:
-            knowledge_snapshot = await build_knowledge_snapshot(knowledge_only_session_id)
-            project_doc = knowledge_snapshot.get("project")
-            if project_doc:
-                structured = {
-                    "chat_mode": chat_mode,
-                    "project_goal": _trim_text(project_doc.get("project_goal", ""), 400),
-                    "architecture_style": _trim_text(project_doc.get("architecture_style", ""), 300),
-                    "domain": _trim_text(project_doc.get("domain", ""), 120),
-                    "purpose": _trim_text(project_doc.get("purpose", ""), 260),
-                    "target_users": _trim_text(project_doc.get("target_users", ""), 180),
-                    "system_type": _trim_text(project_doc.get("system_type", ""), 120),
-                    "core_behavior": _trim_text(project_doc.get("core_behavior", ""), 320),
-                    "key_capabilities": _clean_list(project_doc.get("key_capabilities", []), 8),
-                    "workflow_summary": _trim_text(project_doc.get("workflow_summary", ""), 320),
-                    "analysis_focus": _clean_list(project_doc.get("analysis_focus", []), 8),
-                    "domain_confidence": _trim_text(project_doc.get("domain_confidence", ""), 40),
-                    "validated_domain": _trim_text(project_doc.get("validated_domain", ""), 120),
-                    "validated_behavior": _trim_text(project_doc.get("validated_behavior", ""), 320),
-                    "verification_confidence": _trim_text(project_doc.get("verification_confidence", ""), 40),
-                    "fact_entry_points": _clean_list(project_doc.get("fact_entry_points", []), 6),
-                    "fact_modules": _clean_list(project_doc.get("fact_modules", []), 8),
-                    "fact_actions": _clean_list(project_doc.get("fact_actions", []), 8),
-                    "fact_flow": _trim_text(project_doc.get("fact_flow", ""), 240),
-                    "project_type": _trim_text(project_doc.get("project_type", ""), 40),
-                    "project_goal_confidence": _trim_text(project_doc.get("project_goal_confidence", ""), 20),
-                    "key_modules": _clean_list(project_doc.get("key_modules", []), 12),
-                    "core_features": _clean_list(project_doc.get("core_features", []), 10),
-                    "risks": _clean_list(project_doc.get("risks", []), 10),
-                    "issues": [],
-                    "remaining": [],
-                    "summary": _trim_text(project_doc.get("summary", ""), 500),
-                    "architecture_notes": "",
-                    "related_files": _clean_list(project_doc.get("structure", []), 10),
-                }
-                context_string = _build_context_string(structured, chat_mode)
-                return {
-                    "context_string": context_string,
-                    "structured": structured,
-                    "source": chat_mode,
-                    "session_id": knowledge_only_session_id,
-                }
-        return {
-            "context_string": "",
-            "structured": {},
-            "source": chat_mode,
-            "session_id": session_id or "",
-        }
+        raise ValueError(f"No stored analysis context found for session '{session_id}'")
 
     structured = _extract_structured_context(session["result"], chat_mode)
     structured["session_title"] = _trim_text(session.get("title", ""), 160)
@@ -378,9 +333,13 @@ async def build_chat_context(
         structured["files_viewed"] = _clean_list(memory_profile.get("files_viewed", []), 8)
     context_string = _build_context_string(structured, chat_mode)
 
-    print(
-        f"[CONTEXT] Built {chat_mode} context: {len(context_string)} chars "
-        f"from session {session.get('session_id', '')}"
+    logger.info(
+        "Built chat context",
+        extra={"extra_data": {
+            "chat_mode": chat_mode,
+            "context_chars": len(context_string),
+            "session_id": session.get("session_id", ""),
+        }},
     )
 
     return {

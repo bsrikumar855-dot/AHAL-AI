@@ -1,6 +1,10 @@
 import json
 import re
 
+from app.core.logging import get_logger
+
+logger = get_logger("services.llm_wrapper")
+
 class LLMWrapper:
     """Wrapper to handle LLM unreliability, retries, and strict JSON parsing."""
     def __init__(self, llm_callable):
@@ -9,7 +13,7 @@ class LLMWrapper:
     async def generate(self, prompt: str) -> dict:
         fallback = {
              "project_goal": "LLM failed to generate structured output",
-             "architecture_style": "Unknown",
+             "architecture_style": "unknown",
              "key_modules": [],
              "core_features": [],
              "risks": ["LLM parsing failure"],
@@ -26,7 +30,6 @@ class LLMWrapper:
                 # Call the underlying LLM function
                 response = await self.llm_callable(prompt)
                 text = str(response)
-                print(f"[LLMWrapper] RAW LLM response (attempt {attempt+1}):\n{text[:500]}")
                 
                 # Clean Markdown blocks
                 text = re.sub(r"```json", "", text, flags=re.IGNORECASE)
@@ -38,10 +41,16 @@ class LLMWrapper:
                     parsed = json.loads(match.group(0))
                     if isinstance(parsed, dict):
                         return parsed
-                print(f"[LLMWrapper] Attempt {attempt+1} failed: No valid JSON dictionary found in output")
+                logger.warning(
+                    "LLMWrapper parsing failed",
+                    extra={"extra_data": {"attempt": attempt + 1, "response_length": len(text)}},
+                )
             except Exception as e:
-                print(f"[LLMWrapper] Attempt {attempt+1} failed with error: {e}")
+                logger.warning(
+                    "LLMWrapper attempt failed",
+                    extra={"extra_data": {"attempt": attempt + 1, "error": str(e)}},
+                )
 
         # All retries failed
-        print("[LLMWrapper] All 3 retries failed. Returning safe fallback.")
+        logger.warning("LLMWrapper returning fallback after exhausted attempts")
         return fallback

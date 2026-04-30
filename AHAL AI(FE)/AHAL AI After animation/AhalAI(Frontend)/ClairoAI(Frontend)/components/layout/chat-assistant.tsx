@@ -4,19 +4,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Bot, ChevronLeft, SendHorizonal, User2 } from "lucide-react";
 
-import { askAI, getChatHistory, getSessionIntelligence, type ChatMode } from "@/lib/api";
+import { askAI, type ChatMode } from "@/lib/api";
 import { getChatMode, getSessionId, SESSION_EVENT_NAME, SESSION_FOCUS_EVENT_NAME, setChatMode } from "@/lib/session";
-import type { SessionIntelligenceResponse } from "@/types";
 
-type ChatMessage = {
-  id: string;
+type Message = {
   role: "user" | "assistant";
   content: string;
-  source?: string;
-  relatedFiles?: string[];
-  modulesInvolved?: string[];
-  suggestedQuestions?: string[];
-  isLoading?: boolean;
 };
 
 const CHAT_MODES: Array<{
@@ -29,85 +22,59 @@ const CHAT_MODES: Array<{
     id: "code",
     label: "Code Chat",
     intro: "Ask about functions, logic, and runtime behavior.",
-    empty: "Ask things like “What does this function do?” or “Explain this logic flow.”",
+    empty: 'Ask things like "What does this function do?" or "Explain this logic flow."',
   },
   {
     id: "folder",
     label: "Folder Chat",
     intro: "Ask about structure, modules, and system design.",
-    empty: "Ask things like “Explain this folder structure” or “What are the main modules?”",
+    empty: 'Ask things like "Explain this folder structure" or "What are the main modules?"',
   },
   {
     id: "repo",
     label: "Repo Chat",
     intro: "Ask about project purpose, architecture, risks, and improvements.",
-    empty: "Ask things like “What does this repo do?” or “What are the biggest risks?”",
+    empty: 'Ask things like "What does this repo do?" or "What are the biggest risks?"',
   },
 ];
 
-const AI_ERROR_MESSAGE = "I have the project context loaded, and I am refining the next answer now. Please try again in a moment.";
-
-function createMessageId() {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
+const AI_ERROR_MESSAGE = "Error. Try again.";
 
 function normalizeAssistantCopy(answer: string) {
-  return answer || AI_ERROR_MESSAGE;
+  return answer.trim() || AI_ERROR_MESSAGE;
 }
 
-function buildInstantAssistantReply(
-  mode: ChatMode,
-  focusHint: string,
-  intelligence: SessionIntelligenceResponse | null
-) {
-  const topWorkflow = intelligence?.workflows?.[0];
-  const topModules = intelligence?.graph?.central_nodes?.slice(0, 3) || [];
-  const graphSummary = intelligence?.graph?.summary || "";
-  const memoryFocus = intelligence?.memory_profile?.focus || "";
-  const workflowLine =
-    topWorkflow?.steps?.length
-      ? `${topWorkflow.name}: ${topWorkflow.steps.slice(0, 4).join(" -> ")}`
-      : "";
+const streamResponse = (text: string, onChunk: (value: string) => void) =>
+  new Promise<void>((resolve) => {
+    let index = 0;
+    const interval = window.setInterval(() => {
+      onChunk(text.slice(0, index));
+      index += 1;
+      if (index > text.length) {
+        window.clearInterval(interval);
+        resolve();
+      }
+    }, 10);
+  });
 
-  const modeLabel =
-    mode === "repo"
-      ? "repository architecture"
-      : mode === "folder"
-        ? "project structure"
-        : "code behavior";
-
-  const parts = [
-    `I am grounding this answer in the current ${modeLabel}.`,
-    focusHint || memoryFocus || graphSummary || "The latest stored analysis is already available.",
-  ];
-
-  if (topModules.length) {
-    parts.push(`Current core modules: ${topModules.join(", ")}.`);
-  }
-  if (workflowLine) {
-    parts.push(`System workflow: ${workflowLine}.`);
-  }
-
-  parts.push("Refining the deeper explanation now...");
-  return parts.join(" ");
+interface ChatAssistantProps {
+  isOpen: boolean;
+  onOpenChange: (open: boolean) => void;
 }
 
-export function ChatAssistant() {
-  const [isOpen, setIsOpen] = useState(true);
+export function ChatAssistant({ isOpen, onOpenChange }: ChatAssistantProps) {
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [isSending, setIsSending] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [historyLoaded, setHistoryLoaded] = useState(false);
   const [chatMode, setChatModeState] = useState<ChatMode>("code");
   const [focusHint, setFocusHint] = useState("");
-  const [intelligence, setIntelligence] = useState<SessionIntelligenceResponse | null>(null);
   const [suggestedQuestions, setSuggestedQuestions] = useState<string[]>([
     "Explain system workflow",
     "What are the main risks?",
     "How can this be improved?",
   ]);
-  const scrollerRef = useRef<HTMLDivElement>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
   const handleModeChange = (mode: ChatMode) => {
     setChatMode(mode);
@@ -119,7 +86,6 @@ export function ChatAssistant() {
     const currentChatMode = getChatMode();
     setSessionId(currentSessionId);
     setChatModeState(currentChatMode);
-    setHistoryLoaded(false);
 
     const handleSessionChange = (event: Event) => {
       const detail = (event as CustomEvent<{ sessionId?: string; mode?: ChatMode }>).detail;
@@ -127,7 +93,6 @@ export function ChatAssistant() {
       const nextMode = detail?.mode || getChatMode();
       setSessionId(nextSessionId);
       setChatModeState(nextMode);
-      setHistoryLoaded(false);
     };
 
     const handleFocusChange = (event: Event) => {
@@ -137,15 +102,6 @@ export function ChatAssistant() {
         return;
       }
       setFocusHint(nextHint);
-      setMessages((current) => [
-        ...current,
-        {
-          id: createMessageId(),
-          role: "assistant",
-          content: nextHint,
-          source: getChatMode(),
-        },
-      ]);
     };
 
     window.addEventListener(SESSION_EVENT_NAME, handleSessionChange);
@@ -157,98 +113,15 @@ export function ChatAssistant() {
   }, []);
 
   useEffect(() => {
-    setHistoryLoaded(false);
+    setMessages([]);
   }, [chatMode]);
 
   useEffect(() => {
-    if (!sessionId || historyLoaded) {
-      return;
-    }
-
-    let active = true;
     setMessages([]);
-
-    getChatHistory(sessionId, chatMode)
-      .then((history) => {
-        if (!active) {
-          return;
-        }
-
-        if (history.count === 0) {
-          setMessages([]);
-          return;
-        }
-
-        setMessages(
-          history.history.flatMap((entry) => [
-            {
-              id: createMessageId(),
-              role: "user",
-              content: entry.question,
-            },
-            {
-              id: createMessageId(),
-              role: "assistant",
-              content: entry.answer,
-              source: chatMode,
-              relatedFiles: [],
-              modulesInvolved: [],
-              suggestedQuestions: [],
-            },
-          ])
-        );
-      })
-      .catch((error) => {
-        console.error("API ERROR:", error);
-        if (active) {
-          setMessages([]);
-        }
-      })
-      .finally(() => {
-        if (active) {
-          setHistoryLoaded(true);
-        }
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [chatMode, historyLoaded, sessionId]);
-
-  useEffect(() => {
-    if (!sessionId) {
-      setIntelligence(null);
-      return;
-    }
-
-    let active = true;
-    getSessionIntelligence(sessionId)
-      .then((payload) => {
-        if (active) {
-          setIntelligence(payload);
-        }
-      })
-      .catch((error) => {
-        console.error("API ERROR:", error);
-        if (active) {
-          setIntelligence(null);
-        }
-      });
-
-    return () => {
-      active = false;
-    };
   }, [sessionId]);
 
   useEffect(() => {
-    if (!scrollerRef.current) {
-      return;
-    }
-
-    scrollerRef.current.scrollTo({
-      top: scrollerRef.current.scrollHeight,
-      behavior: "smooth",
-    });
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
   const activeMode = CHAT_MODES.find((item) => item.id === chatMode) || CHAT_MODES[0];
@@ -269,41 +142,25 @@ export function ChatAssistant() {
       setMessages((current) => [
         ...current,
         {
-          id: createMessageId(),
           role: "assistant",
-          content: `No ${chatMode} analysis found. Run ${chatMode} analysis first.`,
-          source: chatMode,
+          content: "No active analysis session. Run analysis first.",
         },
       ]);
       setInput("");
       return;
     }
 
-    const userMessage: ChatMessage = {
-      id: createMessageId(),
+    const userMessage: Message = {
       role: "user",
       content: question,
     };
-    const instantId = createMessageId();
-    const thinkingId = createMessageId();
-    const instantReply = buildInstantAssistantReply(chatMode, focusHint, intelligence);
 
-    setSessionId(currentSessionId);
     setMessages((current) => [
       ...current,
       userMessage,
       {
-        id: instantId,
         role: "assistant",
-        content: instantReply,
-        source: chatMode,
-      },
-      {
-        id: thinkingId,
-        role: "assistant",
-        content: "Refining the deeper answer...",
-        source: chatMode,
-        isLoading: true,
+        content: "",
       },
     ]);
     setInput("");
@@ -313,34 +170,26 @@ export function ChatAssistant() {
       const response = await askAI(question, currentSessionId, chatMode);
       setSuggestedQuestions(response.suggested_questions || suggestedQuestions);
       setSessionId(response.session_id || currentSessionId);
-      setMessages((current) =>
-        current.map((message) =>
-          message.id === thinkingId
-            ? {
-                id: thinkingId,
-                role: "assistant",
-                content: normalizeAssistantCopy(response.answer),
-                source: response.source || chatMode,
-                relatedFiles: response.related_files || [],
-                modulesInvolved: response.modules_involved || [],
-                suggestedQuestions: response.suggested_questions || [],
-              }
-            : message
-        )
-      );
+      await streamResponse(normalizeAssistantCopy(response.answer), (value) => {
+        setMessages((current) =>
+          current.map((message, index) =>
+            index === current.length - 1
+              ? {
+                  ...message,
+                  content: value,
+                }
+              : message
+          )
+        );
+      });
     } catch (error) {
       console.error("API ERROR:", error);
       setMessages((current) =>
-        current.map((message) =>
-          message.id === thinkingId
+        current.map((message, index) =>
+          index === current.length - 1
             ? {
-                id: thinkingId,
-                role: "assistant",
-                content: error instanceof Error ? error.message : AI_ERROR_MESSAGE,
-                source: chatMode,
-                relatedFiles: [],
-                modulesInvolved: [],
-                suggestedQuestions,
+                ...message,
+                content: AI_ERROR_MESSAGE,
               }
             : message
         )
@@ -387,7 +236,7 @@ export function ChatAssistant() {
 
                 <button
                   type="button"
-                  onClick={() => setIsOpen(false)}
+                  onClick={() => onOpenChange(false)}
                   className="rounded-lg border border-white/5 bg-white/5 p-2 text-slate-400 transition-colors hover:border-sky-400/20 hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/70"
                   aria-label="Close chat assistant"
                 >
@@ -434,19 +283,16 @@ export function ChatAssistant() {
                   </div>
                 </div>
 
-                <div
-                  ref={scrollerRef}
-                  className="mt-4 flex-1 space-y-4 overflow-y-auto pr-1"
-                >
+                <div className="mt-4 flex-1 space-y-4 overflow-y-auto pr-1">
                   {messages.length === 0 ? (
                     <div className="flex h-full items-center justify-center rounded-2xl border border-dashed border-white/10 bg-white/[0.02] px-4 py-6 text-center">
                       <p className="text-sm leading-6 text-slate-400">{activeMode.empty}</p>
                     </div>
                   ) : null}
 
-                  {messages.map((message) => (
+                  {messages.map((message, index) => (
                     <div
-                      key={message.id}
+                      key={`${message.role}-${index}`}
                       className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
                     >
                       <div
@@ -470,42 +316,10 @@ export function ChatAssistant() {
                           )}
                         </div>
                         <p className="whitespace-pre-wrap text-sm leading-6">{message.content}</p>
-                        {message.role === "assistant" && !message.isLoading ? (
-                          <>
-                            <div className="mt-3 flex flex-wrap gap-2 text-[11px] uppercase tracking-[0.16em] text-slate-400">
-                              <span className="rounded-full border border-white/8 px-2 py-1">
-                                Source {message.source || chatMode}
-                              </span>
-                            </div>
-                            {message.relatedFiles && message.relatedFiles.length > 0 ? (
-                              <div className="mt-3 flex flex-wrap gap-2">
-                                {message.relatedFiles.map((file) => (
-                                  <span
-                                    key={`${message.id}-${file}`}
-                                    className="rounded-full border border-sky-400/15 bg-sky-400/5 px-2 py-1 text-[11px] text-sky-100"
-                                  >
-                                    {file}
-                                  </span>
-                                ))}
-                              </div>
-                            ) : null}
-                            {message.modulesInvolved && message.modulesInvolved.length > 0 ? (
-                              <div className="mt-3 flex flex-wrap gap-2">
-                                {message.modulesInvolved.map((module) => (
-                                  <span
-                                    key={`${message.id}-module-${module}`}
-                                    className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-1 text-[11px] text-slate-200"
-                                  >
-                                    {module}
-                                  </span>
-                                ))}
-                              </div>
-                            ) : null}
-                          </>
-                        ) : null}
                       </div>
                     </div>
                   ))}
+                  <div ref={chatEndRef} />
                 </div>
               </div>
 
@@ -536,7 +350,7 @@ export function ChatAssistant() {
                           : "cursor-not-allowed border border-white/5 bg-white/5 text-slate-500"
                       }`}
                     >
-                      {isSending ? "Thinking..." : "Send"}
+                      {isSending ? "Sending..." : "Send"}
                       <SendHorizonal className="h-4 w-4" />
                     </button>
                   </div>
@@ -555,7 +369,7 @@ export function ChatAssistant() {
           >
             <button
               type="button"
-              onClick={() => setIsOpen(true)}
+              onClick={() => onOpenChange(true)}
               className="glass-card inline-flex items-center gap-3 rounded-2xl border border-sky-400/10 bg-slate-950/85 px-4 py-3 text-left shadow-[0_20px_60px_rgba(2,6,23,0.4)] transition-all hover:border-sky-400/20 hover:bg-slate-900/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/70"
             >
               <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-sky-400/10 text-sky-300">

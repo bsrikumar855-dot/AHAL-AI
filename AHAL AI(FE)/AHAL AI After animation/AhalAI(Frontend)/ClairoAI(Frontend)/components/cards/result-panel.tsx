@@ -24,11 +24,58 @@ interface ResultPanelProps {
   result: AnalysisResult;
 }
 
+const hasText = (value: unknown) => typeof value === "string" && value.trim().length > 0;
+
+const hasRenderableValue = (value: unknown): boolean => {
+  if (typeof value === "string") return value.trim().length > 0;
+  if (Array.isArray(value)) return value.some((item) => hasRenderableValue(item));
+  if (value && typeof value === "object") return Object.values(value).some((item) => hasRenderableValue(item));
+  return Boolean(value);
+};
+
+const renderValue = (value: any) => {
+  if (!hasRenderableValue(value)) return null;
+
+  if (typeof value === "string") return value;
+
+  if (Array.isArray(value)) {
+    return value.map((v, i) => <div key={i}>- {typeof v === "object" ? JSON.stringify(v) : String(v)}</div>);
+  }
+
+  if (typeof value === "object") {
+    return value.description || JSON.stringify(value);
+  }
+
+  return String(value);
+};
+
 export function ResultPanel({ result }: ResultPanelProps) {
   const [copied, setCopied] = useState(false);
   const [intelligence, setIntelligence] = useState<SessionIntelligenceResponse | null>(null);
+  const projectIntelligence = intelligence?.project as
+    | (SessionIntelligenceResponse["project"] & { system_workflow?: AnalysisResult["system_workflow"] })
+    | undefined;
   const fallbackWorkflows = result.workflows || [];
   const workflows = intelligence?.workflows?.length ? intelligence.workflows : fallbackWorkflows;
+  const data = {
+    ...result,
+    system_workflow: projectIntelligence?.system_workflow ?? result.system_workflow,
+    insights: Array.isArray(intelligence?.project?.insights) && intelligence.project.insights.length > 0
+      ? intelligence.project.insights
+      : Array.isArray(result.insights)
+        ? result.insights
+        : Array.isArray((result as AnalysisResult & { insight_list?: unknown[] }).insight_list)
+          ? (result as AnalysisResult & { insight_list?: unknown[] }).insight_list
+          : [],
+    insight_list: Array.isArray((result as AnalysisResult & { insight_list?: unknown[] }).insight_list)
+      ? (result as AnalysisResult & { insight_list?: unknown[] }).insight_list
+      : [],
+  };
+  const workflow = data.system_workflow;
+  const insights =
+    data.insights ||
+    (data as AnalysisResult & { insight_list?: unknown[] }).insight_list ||
+    [];
   const graph = intelligence?.graph?.edges?.length || intelligence?.graph?.dependencies
     ? intelligence.graph
     : result.dependency_graph;
@@ -37,27 +84,44 @@ export function ResultPanel({ result }: ResultPanelProps) {
   const graphConfidence = graph?.confidence_percent ?? null;
   const graphReasons = graph?.uncertainty_reasons ?? [];
   const centralNodes = graph?.central_nodes?.slice(0, 4) ?? [];
-  const fallbackWorkflowMessage =
-    workflows?.[0]?.message || "No explicit workflows found, inferred structure instead.";
   const dependencyEntries = graph?.dependencies
     ? Object.entries(graph.dependencies).slice(0, 6)
     : [];
-  const summaryWhat =
-    result.summary_blocks?.what ||
-    graph?.summary ||
-    "Structured analysis inferred from modules, workflows, and dependencies.";
-  const summaryWhy =
-    result.summary_blocks?.why ||
-    (dependencyEntries.length
-      ? `Dependencies such as ${dependencyEntries
-          .map(([source, targets]) => `${source} -> ${targets[0] || "dependency"}`)
-          .join(", ")} explain the main module relationships.`
-      : "Dependency and workflow intelligence were inferred from the code structure.");
+  const summaryWhat = result.summary?.what || result.summary_blocks?.what || "";
+  const summaryWhy = result.summary?.why || result.summary_blocks?.why || "";
+  const displayProjectGoal = result.project_goal || summaryWhat || "N/A";
+  const workflowSections = workflow
+    ? [
+        { label: "Initialization", value: renderValue(workflow.initialization) },
+        { label: "Request Flow", value: renderValue(workflow.request_flow) },
+        { label: "Processing Flow", value: renderValue(workflow.processing_flow) },
+        { label: "Response Flow", value: renderValue(workflow.response_flow) },
+      ].filter((section) => section.value)
+    : [];
+  const hasWorkflow = workflowSections.length > 0;
+  const hasGraph = Boolean(graph?.nodes?.length || graph?.edges?.length || dependencyEntries.length);
+  const validInsights = Array.isArray(insights)
+    ? insights.filter((item) => {
+        if (typeof item === "string") return item.trim().length > 0;
+        if (item && typeof item === "object") {
+          const candidate = item as { insight?: unknown; impact?: unknown };
+          return hasText(candidate.insight) || hasText(candidate.impact);
+        }
+        return false;
+      })
+    : [];
+  const hasInsights = validInsights.length > 0;
+
+  useEffect(() => {
+    console.log("API RESPONSE:", data);
+    console.log("WORKFLOW:", data.system_workflow);
+  }, [data]);
 
   useEffect(() => {
     let active = true;
     getSessionIntelligence(result.session_id)
       .then((payload) => {
+        console.log("API RESPONSE:", payload);
         if (active) {
           setIntelligence(payload);
         }
@@ -112,7 +176,7 @@ export function ResultPanel({ result }: ResultPanelProps) {
     } catch {
       const fallbackReport = [
         "=== 1. PROJECT OVERVIEW ===",
-        `- What the project does: ${result.summary_blocks?.what || "Not found in analyzed data"}`,
+        `- What the project does: ${summaryWhat || "Not found in analyzed data"}`,
         `- Main purpose: ${result.project_goal || "Not found in analyzed data"}`,
         "",
         "=== 2. TECH STACK ===",
@@ -120,7 +184,7 @@ export function ResultPanel({ result }: ResultPanelProps) {
         "",
         "=== 3. ARCHITECTURE ===",
         `- System design style: ${result.architecture_style || "Not found in analyzed data"}`,
-        `- High-level explanation: ${result.summary_blocks?.why || "Not found in analyzed data"}`,
+        `- High-level explanation: ${summaryWhy || "Not found in analyzed data"}`,
         "",
         "=== 4. CORE MODULES ===",
         ...(result.key_modules.length > 0 ? result.key_modules.map((item) => `- ${item}`) : ["- Not found in analyzed data"]),
@@ -147,7 +211,7 @@ export function ResultPanel({ result }: ResultPanelProps) {
           : ["- Not found in analyzed data"]),
         "",
         "=== 10. FINAL SUMMARY ===",
-        `- ${result.project_goal || "Not found in analyzed data"}`,
+        `- ${summaryWhat || result.project_goal || "Not found in analyzed data"}`,
       ].join("\n");
       downloadPDF(fallbackReport, `clairo-report-${result.session_id}.pdf`);
     }
@@ -195,13 +259,13 @@ export function ResultPanel({ result }: ResultPanelProps) {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {/* Project Goal */}
         <ResultCard icon={Target} title="Project Goal" delay={0}>
-          <p className="text-slate-300">{result.project_goal || "—"}</p>
+          <p className="text-slate-300">{displayProjectGoal}</p>
         </ResultCard>
 
         {/* Architecture */}
         <ResultCard icon={Layers} title="Architecture Style" delay={0.07}>
           <p className="text-slate-300">
-            {result.architecture_style || "—"}
+            {result.architecture_style || "-"}
           </p>
         </ResultCard>
 
@@ -275,7 +339,7 @@ export function ResultPanel({ result }: ResultPanelProps) {
                 </p>
               </div>
             )}
-            {(result.summary_blocks?.why || graph?.summary) && (
+            {summaryWhy && (
               <div>
                 <span className="text-xs font-semibold text-violet-400 uppercase tracking-wider">
                   Why
@@ -293,7 +357,7 @@ export function ResultPanel({ result }: ResultPanelProps) {
                 <ul className="mt-1 space-y-1">
                   {result.summary_blocks.remaining.map((item, i) => (
                     <li key={i} className="text-slate-300 text-xs flex items-start gap-1.5">
-                      <span className="text-violet-400 mt-0.5">→</span> {item}
+                      <span className="text-violet-400 mt-0.5">-&gt;</span> {item}
                     </li>
                   ))}
                 </ul>
@@ -307,7 +371,7 @@ export function ResultPanel({ result }: ResultPanelProps) {
                 <ul className="mt-1 space-y-1">
                   {result.summary_blocks.issues.map((item, i) => (
                     <li key={i} className="text-amber-200/70 text-xs flex items-start gap-1.5">
-                      <span className="text-amber-400 mt-0.5">⚠</span> {item}
+                      <span className="text-amber-400 mt-0.5">!</span> {item}
                     </li>
                   ))}
                 </ul>
@@ -315,7 +379,7 @@ export function ResultPanel({ result }: ResultPanelProps) {
             )}
             {!summaryWhat &&
               !summaryWhy && (
-                <p>Structured summary inferred from stored intelligence</p>
+                <p>No summary available</p>
               )}
             {result.confidence_score ? (
               <div className="rounded-xl border border-emerald-400/10 bg-emerald-400/5 px-3 py-2">
@@ -333,8 +397,8 @@ export function ResultPanel({ result }: ResultPanelProps) {
           </div>
         </ResultCard>
 
-        <ResultCard icon={GitBranch} title="System Workflow" delay={0.42} variant="list">
-          {workflows?.length ? (
+        {hasWorkflow ? (
+          <ResultCard icon={GitBranch} title="System Workflow" delay={0.42} variant="list">
             <div className="space-y-3">
               {workflowConfidence ? (
                 <div className="rounded-xl border border-cyan-400/10 bg-cyan-400/5 px-3 py-2 text-xs text-cyan-100">
@@ -346,34 +410,18 @@ export function ResultPanel({ result }: ResultPanelProps) {
                   ) : null}
                 </div>
               ) : null}
-              {workflows.slice(0, 4).map((workflow, index) => (
-                <button
-                  key={`${workflow.name}-${index}`}
-                  onClick={() => {
-                    void pushFocus({
-                      focus: `Now focusing on workflow ${workflow.name}`,
-                      workflow: workflow.name,
-                    });
-                  }}
-                  className="w-full rounded-xl border border-white/8 bg-white/[0.03] p-3 text-left transition-all hover:border-cyan-400/20 hover:bg-cyan-400/5"
-                >
-                  <p className="text-sm font-semibold text-slate-100">{workflow.name}</p>
-                  <p className="mt-1 text-xs text-slate-400">
-                    {workflow.steps?.slice(0, 4).join(" -> ") || workflow.summary || fallbackWorkflowMessage}
-                  </p>
-                  {workflow.summary ? (
-                    <p className="mt-2 text-xs text-slate-500">{workflow.summary}</p>
-                  ) : null}
-                </button>
+              {workflowSections.map((section) => (
+                <div key={section.label} className="rounded-xl border border-white/8 bg-white/[0.03] p-3">
+                  <p className="text-sm font-semibold text-slate-100">{section.label}</p>
+                  <div className="mt-1 text-xs text-slate-400">{section.value}</div>
+                </div>
               ))}
             </div>
-          ) : (
-            <p>{fallbackWorkflowMessage}</p>
-          )}
-        </ResultCard>
+          </ResultCard>
+        ) : null}
 
-        <ResultCard icon={Network} title="Dependency Graph" delay={0.49} variant="list">
-          {graph?.edges?.length ? (
+        {hasGraph ? (
+          <ResultCard icon={Network} title="Dependency Graph" delay={0.49} variant="list">
             <div className="space-y-2">
               {graphConfidence ? (
                 <div className="rounded-xl border border-violet-400/10 bg-violet-400/5 px-3 py-2 text-xs text-violet-100">
@@ -391,67 +439,68 @@ export function ResultPanel({ result }: ResultPanelProps) {
                   <p className="mt-1 text-xs text-slate-300">{centralNodes.join(", ")}</p>
                 </div>
               ) : null}
-              {graph.edges.slice(0, 6).map((edge, index) => (
-                <button
-                  key={`${edge.source}-${edge.target}-${index}`}
-                  onClick={() => {
-                    void pushFocus({
-                      focus: `Now focusing on relationship ${edge.source} to ${edge.target}`,
-                      module: edge.source,
-                    });
-                  }}
-                  className="w-full rounded-lg border border-white/8 bg-white/[0.03] px-3 py-2 text-left text-xs text-slate-300 transition-all hover:border-cyan-400/20 hover:bg-cyan-400/5"
-                >
-                  {edge.source} {"->"} {edge.target}
-                  <span className="ml-2 text-slate-500">({edge.relation})</span>
-                </button>
-              ))}
+              {graph?.edges?.length
+                ? graph.edges.slice(0, 6).map((edge, index) => (
+                    <button
+                      key={`${edge.source}-${edge.target}-${index}`}
+                      onClick={() => {
+                        void pushFocus({
+                          focus: `Now focusing on relationship ${edge.source} to ${edge.target}`,
+                          module: edge.source,
+                        });
+                      }}
+                      className="w-full rounded-lg border border-white/8 bg-white/[0.03] px-3 py-2 text-left text-xs text-slate-300 transition-all hover:border-cyan-400/20 hover:bg-cyan-400/5"
+                    >
+                      {edge.source} {"->"} {edge.target}
+                      <span className="ml-2 text-slate-500">({edge.relation})</span>
+                    </button>
+                  ))
+                : dependencyEntries.map(([source, targets], index) => (
+                    <button
+                      key={`${source}-${index}`}
+                      onClick={() => {
+                        void pushFocus({
+                          focus: `Now focusing on dependency path from ${source}`,
+                          module: source,
+                        });
+                      }}
+                      className="w-full rounded-lg border border-white/8 bg-white/[0.03] px-3 py-2 text-left text-xs text-slate-300 transition-all hover:border-cyan-400/20 hover:bg-cyan-400/5"
+                    >
+                      {source} {"->"} {(targets && targets[0]) || "dependency"}
+                    </button>
+                  ))}
             </div>
-          ) : dependencyEntries.length ? (
-            <div className="space-y-2">
-              {dependencyEntries.map(([source, targets], index) => (
-                <button
-                  key={`${source}-${index}`}
-                  onClick={() => {
-                    void pushFocus({
-                      focus: `Now focusing on dependency path from ${source}`,
-                      module: source,
-                    });
-                  }}
-                  className="w-full rounded-lg border border-white/8 bg-white/[0.03] px-3 py-2 text-left text-xs text-slate-300 transition-all hover:border-cyan-400/20 hover:bg-cyan-400/5"
-                >
-                  {source} {"->"} {(targets && targets[0]) || "dependency"}
-                </button>
-              ))}
-            </div>
-          ) : (
-            <p>Dependency graph inferred from imports and module structure.</p>
-          )}
-        </ResultCard>
+          </ResultCard>
+        ) : null}
 
-        <ResultCard icon={Zap} title="Insights" delay={0.56} variant="list">
-          {result.insights?.length ? (
-            <ul className="space-y-2">
-              {result.insights.map((insight, index) => (
-                <li key={`${insight}-${index}`} className="flex items-start gap-2">
-                  <span className="mt-1.5 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-violet-300" />
-                  <span className="text-sm text-slate-300">{insight}</span>
-                </li>
-              ))}
-            </ul>
-          ) : intelligence?.project?.insights?.length ? (
-            <ul className="space-y-2">
-              {intelligence.project.insights.map((insight, index) => (
-                <li key={`${insight}-${index}`} className="flex items-start gap-2">
-                  <span className="mt-1.5 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-violet-300" />
-                  <span className="text-sm text-slate-300">{insight}</span>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p>Using inferred insights from architecture, workflows, and dependency signals.</p>
-          )}
-        </ResultCard>
+        {hasInsights ? (
+          <ResultCard icon={Zap} title="Insights" delay={0.56} variant="list">
+            <div className="space-y-3">
+              {validInsights.map((item, index) => {
+                const insightText =
+                  typeof item === "object" && item !== null
+                    ? String((item as { insight?: unknown }).insight || "")
+                    : String(item);
+                const impactText =
+                  typeof item === "object" && item !== null
+                    ? String((item as { impact?: unknown }).impact || "")
+                    : "";
+
+                return (
+                  <div
+                    key={`${insightText || index}-${index}`}
+                    className="rounded-xl border border-white/8 bg-white/[0.03] p-3"
+                  >
+                    <p className="text-sm font-semibold text-slate-100">{insightText}</p>
+                    {hasText(impactText) ? (
+                      <p className="mt-1 text-xs text-slate-400">{impactText}</p>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </ResultCard>
+        ) : null}
       </div>
     </div>
   );

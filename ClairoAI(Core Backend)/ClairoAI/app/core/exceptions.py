@@ -116,11 +116,8 @@ def register_exception_handlers(app: FastAPI) -> None:
         message, details = _extract_http_exception_message(exc)
         logger.error(
             f"HTTPException: {message}",
-            extra={"extra_data": {"path": str(request.url), "status_code": exc.status_code}},
+            extra={"extra_data": {"path": str(request.url), "status_code": exc.status_code, "details": details}},
         )
-        print(f"ERROR: {message}")
-        if details:
-            print(f"ERROR DETAILS: {details}")
         return JSONResponse(
             status_code=exc.status_code,
             content=_error_payload(message, details=details),
@@ -134,13 +131,11 @@ def register_exception_handlers(app: FastAPI) -> None:
             f"{'.'.join(str(part) for part in err.get('loc', []))}: {err.get('msg', '')}"
             for err in exc.errors()
         )
-        message = "Invalid request. Please review the submitted input and try again."
+        message = "Invalid request. Please review the submitted input."
         logger.error(
             f"RequestValidationError: {details}",
             extra={"extra_data": {"path": str(request.url)}},
         )
-        print(f"ERROR: {message}")
-        print(f"ERROR DETAILS: {details}")
         return JSONResponse(
             status_code=422,
             content=_error_payload(message, details=details),
@@ -157,7 +152,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=500,
             content=_error_payload(
-                "Something went wrong on our side. Please try again.",
+                "Something went wrong on our side.",
                 details=exc.__class__.__name__,
             ),
         )

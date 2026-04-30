@@ -7,14 +7,14 @@ Starts a background repository job immediately and returns a processing session.
 
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 from app.core.logging import get_logger
 from app.db.models import SessionDocument, SessionStatus, SessionType
 from app.db.repository import SessionRepository
 from app.db.schemas import RepoAnalyzeRequest, SessionStatusResponse
-from app.services.job_manager import process_repo_analysis_job, start_background_job
-from app.services.repo_service import generate_minimal_analysis
+from app.services.analysis_service import create_task_record
+from app.services.job_manager import process_repo_analysis_job
 
 logger = get_logger("api.repo")
 router = APIRouter()
@@ -32,71 +32,78 @@ router = APIRouter()
         500: {"description": "Unable to start analysis"},
     },
 )
-async def analyze_repo(request: RepoAnalyzeRequest):
+async def analyze_repo(request: RepoAnalyzeRequest, background_tasks: BackgroundTasks):
     """
     Starts repo analysis in the background and returns a processing session.
-    Clients should poll the session status endpoint for progress and partial results.
+    Clients should poll the session status endpoint for progress and fetch the result endpoint once completed.
     """
     repo_url = request.repo_url
-    requested_session_id = str(uuid.uuid4())
+    requested_session_id = str(request.session_id or uuid.uuid4())
 
-    logger.info(f"Repo analysis request received for {repo_url}")
-    print("SESSION:", requested_session_id)
-    print("NEW ANALYSIS GENERATED")
-    print(f"[REPO ANALYZE] QUEUED URL: {repo_url}")
+    logger.info(
+        "Repo analysis request received",
+        extra={"extra_data": {"session_id": requested_session_id, "repo_url": repo_url}},
+    )
 
     try:
         repo_name = repo_url.rstrip("/").split("/")[-1] or "repository"
-        initial_result = generate_minimal_analysis([], repo_url)
         session_kwargs = {
             "type": SessionType.REPO,
             "title": f"Repo: {repo_name}",
             "status": SessionStatus.PROCESSING,
             "preview": repo_url,
             "source_ref": repo_url,
-            "summary": initial_result.get("summary_blocks", {}).get("what", ""),
-            "result": initial_result,
+            "summary": "",
+            "result": None,
             "progress": 0,
-            "stage": "Queued repository analysis",
+            "stage": "upload",
             "job_id": requested_session_id,
         }
         session_kwargs["session_id"] = requested_session_id
 
         session = SessionDocument(**session_kwargs)
         session_id = await SessionRepository.create(session)
+        create_task_record(
+            session_id,
+            task_type=SessionType.REPO.value,
+            title=f"Repo: {repo_name}",
+            preview=repo_url,
+            source_ref=repo_url,
+            progress=0,
+            stage="upload",
+        )
     except Exception as err:
-        print(f"ERROR: Failed to create repo session: {err}")
         logger.error(f"Failed to create repo session: {err}")
         raise HTTPException(
             status_code=500,
             detail={
-                "error": "Repository analysis is warming up. Please retry in a moment.",
+                "error": "Repository analysis is warming up.",
                 "details": str(err),
             },
         )
 
     try:
-        start_background_job(process_repo_analysis_job(session_id, repo_url))
+        background_tasks.add_task(process_repo_analysis_job, session_id, repo_url)
     except Exception as err:
-        print(f"ERROR: Failed to start repo background job: {err}")
         logger.error(f"Failed to start repo background job: {err}")
         await SessionRepository.update_status(
             session_id=session_id,
             status=SessionStatus.FAILED,
             error="Fresh analysis failed",
             progress=100,
-            stage="Analysis startup delayed",
+            stage="finalize",
         )
         raise HTTPException(
             status_code=500,
             detail={
-                "error": "Repository analysis startup is delayed. Please retry in a moment.",
+                "error": "Repository analysis startup is delayed.",
                 "details": str(err),
             },
         )
 
     return SessionStatusResponse(
         session_id=session_id,
+        task_id=session_id,
         job_id=session_id,
         type=SessionType.REPO,
         status=SessionStatus.PROCESSING,
@@ -104,8 +111,8 @@ async def analyze_repo(request: RepoAnalyzeRequest):
         preview=repo_url,
         source_ref=repo_url,
         structure=[],
-        result=initial_result,
+        result=None,
         error=None,
         progress=0,
-        stage="Queued repository analysis",
+        stage="upload",
     )

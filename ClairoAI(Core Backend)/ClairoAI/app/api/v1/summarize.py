@@ -110,51 +110,54 @@ async def summarize_upload(
     if not file.filename or not file.filename.lower().endswith(".zip"):
         raise FileProcessingError("Only .zip files are supported")
 
-    # Read file bytes
-    file_bytes = await file.read()
+    try:
+        # Read file bytes
+        file_bytes = await file.read()
 
-    # Validate size
-    max_size = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
-    if len(file_bytes) > max_size:
-        raise FileProcessingError(
-            f"File exceeds maximum size of {settings.MAX_UPLOAD_SIZE_MB}MB"
+        # Validate size
+        max_size = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+        if len(file_bytes) > max_size:
+            raise FileProcessingError(
+                f"File exceeds maximum size of {settings.MAX_UPLOAD_SIZE_MB}MB"
+            )
+
+        if len(file_bytes) == 0:
+            raise FileProcessingError("Uploaded file is empty")
+
+        logger.info(
+            "Summarize request received (upload)",
+            extra={"extra_data": {
+                "filename": file.filename,
+                "size_bytes": len(file_bytes),
+                "project": project,
+            }},
         )
 
-    if len(file_bytes) == 0:
-        raise FileProcessingError("Uploaded file is empty")
+        # Create job record
+        job = JobRecord(
+            input_type=InputType.PROJECT,
+            project=project,
+            status=JobStatus.PENDING,
+        )
+        await JobRepository.create(job)
 
-    logger.info(
-        "Summarize request received (upload)",
-        extra={"extra_data": {
-            "filename": file.filename,
-            "size_bytes": len(file_bytes),
-            "project": project,
-        }},
-    )
+        # Dispatch background task with file bytes
+        background_tasks.add_task(
+            process_summarization_job,
+            job_id=job.job_id,
+            input_content="",
+            input_type=InputType.PROJECT.value,
+            project=project,
+            file_bytes=file_bytes,
+            filename=file.filename,
+        )
 
-    # Create job record
-    job = JobRecord(
-        input_type=InputType.PROJECT,
-        project=project,
-        status=JobStatus.PENDING,
-    )
-    await JobRepository.create(job)
+        logger.info(f"Upload job dispatched: {job.job_id}")
 
-    # Dispatch background task with file bytes
-    background_tasks.add_task(
-        process_summarization_job,
-        job_id=job.job_id,
-        input_content="",
-        input_type=InputType.PROJECT.value,
-        project=project,
-        file_bytes=file_bytes,
-        filename=file.filename,
-    )
-
-    logger.info(f"Upload job dispatched: {job.job_id}")
-
-    return JobResponse(
-        job_id=job.job_id,
-        status=JobStatus.PENDING,
-        message="Project upload submitted for summarization",
-    )
+        return JobResponse(
+            job_id=job.job_id,
+            status=JobStatus.PENDING,
+            message="Project upload submitted for summarization",
+        )
+    finally:
+        await file.close()

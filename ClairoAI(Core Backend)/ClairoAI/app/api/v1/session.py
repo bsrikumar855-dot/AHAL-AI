@@ -12,7 +12,7 @@ import json
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from app.db.schemas import (
@@ -23,8 +23,10 @@ from app.db.schemas import (
 from app.db.repository import SessionRepository
 from app.core.logging import get_logger
 from app.services.knowledge_store import build_knowledge_snapshot
+from app.services.llm_handler import LLM_TIMEOUT_BACKGROUND
 from app.services.memory_service import get_memory_profile
 from app.services.report_service import build_project_report
+from app.services.job_manager import get_cached_job_state
 
 logger = get_logger("api.session")
 router = APIRouter()
@@ -42,6 +44,54 @@ class SessionIntelligenceResponse(BaseModel):
     workflows: list[dict] = []
     graph: dict = {}
     memory_profile: dict = {}
+
+
+class SessionResultResponse(BaseModel):
+    session_id: str
+    task_id: Optional[str] = None
+    job_id: Optional[str] = None
+    type: str
+    status: str
+    progress: int = 0
+    stage: str = ""
+    result: Optional[dict] = None
+    error: Optional[str] = None
+
+
+def _status_value(value) -> str:
+    return getattr(value, "value", str(value))
+
+
+def _build_status_response(session, *, include_result: bool = False) -> SessionStatusResponse:
+    status_value = _status_value(session.status)
+    error_value = session.error
+    stage_value = session.stage
+    if LLM_TIMEOUT_BACKGROUND.lower() in str(session.error or "").lower():
+        status_value = "processing"
+        error_value = None
+        if not str(stage_value or "").strip():
+            stage_value = "LLM timeout; analysis still running in background"
+    result_payload = None
+    if include_result and status_value == "completed" and session.result is not None:
+        result_payload = session.result
+
+    return SessionStatusResponse(
+        session_id=session.session_id,
+        task_id=session.job_id or session.session_id,
+        job_id=session.job_id,
+        type=session.type,
+        status=status_value,
+        progress=session.progress,
+        stage=stage_value,
+        title=session.title,
+        preview=session.preview,
+        source_ref=session.source_ref,
+        structure=session.structure,
+        result=result_payload,
+        error=error_value,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+    )
 
 
 @router.get(
@@ -66,22 +116,7 @@ async def get_session_status(session_id: str):
         extra={"extra_data": {"session_id": session_id, "status": session.status.value}},
     )
 
-    return SessionStatusResponse(
-        session_id=session.session_id,
-        job_id=session.job_id,
-        type=session.type,
-        status=session.status,
-        progress=session.progress,
-        stage=session.stage,
-        title=session.title,
-        preview=session.preview,
-        source_ref=session.source_ref,
-        structure=session.structure,
-        result=session.result,
-        error=session.error,
-        created_at=session.created_at,
-        updated_at=session.updated_at,
-    )
+    return _build_status_response(session, include_result=False)
 
 
 @router.get(
@@ -91,6 +126,7 @@ async def get_session_status(session_id: str):
     description="Alias for session status using the async job identifier.",
 )
 async def get_job_status(job_id: str):
+    cached = get_cached_job_state(job_id)
     session = await SessionRepository.get_by_job_id(job_id)
     if session is None:
         session = await SessionRepository.get_by_id(job_id)
@@ -98,21 +134,54 @@ async def get_job_status(job_id: str):
     if session is None:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
 
-    return SessionStatusResponse(
+    response = _build_status_response(session, include_result=False)
+    if cached and _status_value(session.status) != "completed":
+        response.progress = int(cached.get("progress", response.progress))
+        response.stage = str(cached.get("stage", response.stage))
+        response.error = cached.get("error", response.error)
+    return response
+
+
+@router.get(
+    "/result/{task_id}",
+    response_model=SessionResultResponse,
+    summary="Get analysis result",
+    description="Returns the final structured analysis result only when the job is completed.",
+)
+async def get_result(task_id: str):
+    session = await SessionRepository.get_by_job_id(task_id)
+    if session is None:
+        session = await SessionRepository.get_by_id(task_id)
+
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"Job '{task_id}' not found")
+
+    status_value = _status_value(session.status)
+    result_payload = session.result.model_dump() if hasattr(session.result, "model_dump") else session.result
+    if status_value != "completed" or not isinstance(result_payload, dict):
+        pending_response = SessionResultResponse(
+            session_id=session.session_id,
+            task_id=session.job_id or session.session_id,
+            job_id=session.job_id,
+            type=_status_value(session.type),
+            status=status_value,
+            progress=session.progress,
+            stage=session.stage,
+            result=None,
+            error=session.error,
+        )
+        return JSONResponse(status_code=202, content=pending_response.model_dump())
+
+    return SessionResultResponse(
         session_id=session.session_id,
+        task_id=session.job_id or session.session_id,
         job_id=session.job_id,
-        type=session.type,
-        status=session.status,
+        type=_status_value(session.type),
+        status=status_value,
         progress=session.progress,
         stage=session.stage,
-        title=session.title,
-        preview=session.preview,
-        source_ref=session.source_ref,
-        structure=session.structure,
-        result=session.result,
+        result=result_payload,
         error=session.error,
-        created_at=session.created_at,
-        updated_at=session.updated_at,
     )
 
 
@@ -170,7 +239,11 @@ async def stream_session_status(session_id: str):
                 "preview": session.preview,
                 "source_ref": session.source_ref,
                 "structure": session.structure,
-                "result": session.result.model_dump() if hasattr(session.result, "model_dump") else session.result,
+                "result": (
+                    session.result.model_dump() if session.status.value == "completed" and hasattr(session.result, "model_dump")
+                    else session.result if session.status.value == "completed"
+                    else None
+                ),
                 "error": session.error,
             }
 
@@ -277,3 +350,24 @@ async def get_session_history(
         skip=skip,
         limit=limit,
     )
+
+
+@router.delete(
+    "/{session_id}",
+    summary="Delete session",
+    description="Deletes a session from history.",
+    responses={
+        200: {"description": "Session deleted"},
+        404: {"description": "Session not found"},
+    },
+)
+async def delete_session(session_id: str):
+    session = await SessionRepository.get_by_id(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
+
+    deleted = await SessionRepository.delete_by_id(session_id)
+    if not deleted:
+        raise HTTPException(status_code=500, detail=f"Failed to delete session '{session_id}'")
+
+    return {"ok": True, "session_id": session_id}

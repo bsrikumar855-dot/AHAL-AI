@@ -3,8 +3,20 @@
 export interface SummaryBlocks {
   what: string;
   why: string;
-  remaining: string[];
+  remaining: string[]; 
   issues: string[];
+}
+
+export interface SummaryPayload {
+  what: string;
+  why: string;
+}
+
+export interface SystemWorkflow {
+  initialization?: string | string[];
+  request_flow?: string | string[];
+  processing_flow?: string | string[];
+  response_flow?: string | string[];
 }
 
 export interface AnalysisResult {
@@ -27,12 +39,14 @@ export interface AnalysisResult {
   key_modules: string[];
   core_features: string[];
   risks: string[];
+  system_workflow?: SystemWorkflow;
   workflows?: WorkflowInsight[];
   dependency_graph?: RelationshipGraph;
   insights?: string[];
   confidence_score?: number;
   confidence_reasons?: string[];
   summary_blocks: SummaryBlocks;
+  summary?: SummaryPayload;
 }
 
 export interface ChatResponse {
@@ -86,6 +100,7 @@ export interface SessionHistoryResponse {
 
 export interface SessionStatusResponse {
   session_id: string;
+  task_id?: string | null;
   job_id?: string | null;
   type: "code" | "folder" | "repo";
   status: "processing" | "completed" | "failed";
@@ -119,10 +134,23 @@ export interface SessionStatusResponse {
     confidence_score?: number;
     confidence_reasons?: string[];
     summary_blocks: SummaryBlocks;
+    summary?: SummaryPayload;
   } | null;
   error: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface SessionResultResponse {
+  session_id: string;
+  task_id?: string | null;
+  job_id?: string | null;
+  type: "code" | "folder" | "repo";
+  status: "processing" | "completed" | "failed";
+  progress: number;
+  stage: string;
+  result: AnalysisResult | null;
+  error: string | null;
 }
 
 export interface SessionReportResponse {
@@ -172,6 +200,7 @@ export interface SessionIntelligenceResponse {
     validated_behavior?: string;
     verification_confidence?: string;
     summary?: string;
+    summary_payload?: SummaryPayload;
     key_modules?: string[];
     core_features?: string[];
     risks?: string[];

@@ -15,19 +15,32 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.core.config import get_settings
 from app.core.logging import setup_logging, get_logger
 from app.core.exceptions import register_exception_handlers
 from app.core.product_identity import PRODUCT_NAME, PRODUCT_TAGLINE, PRODUCT_GOAL, get_product_summary
 from app.db.mongodb import mongodb
+from app.db.repository import SessionRepository
 from app.api.v1.router import router as v1_router
+from app.services.analysis_service import get_task_record, update_task_record
 
 # Initialize structured logging
 setup_logging()
 logger = get_logger("main")
+
+
+def _parse_allowed_origins(value: str) -> list[str]:
+    origins: list[str] = []
+    for origin in str(value or "").split(","):
+        cleaned = origin.strip()
+        if cleaned and cleaned not in origins:
+            origins.append(cleaned)
+    return origins or ["http://localhost:3000"]
 
 
 # ── Lifespan ─────────────────────────────────────────────────────
@@ -79,10 +92,11 @@ def create_app() -> FastAPI:
     )
 
     # ── CORS ─────────────────────────────────────────────────
+    allowed_origins = _parse_allowed_origins(settings.CORS_ALLOWED_ORIGINS)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Restrict in production
-        allow_credentials=True,
+        allow_origins=allowed_origins,
+        allow_credentials="*" not in allowed_origins,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -141,6 +155,49 @@ def create_app() -> FastAPI:
             "health": "/api/v1/health",
             "identity": "/api/v1/identity",
         }
+
+    @app.get("/status/{task_id}", tags=["Tasks"])
+    async def task_status(task_id: str):
+        task = get_task_record(task_id)
+        session = await SessionRepository.get_by_job_id(task_id)
+        if session is None:
+            session = await SessionRepository.get_by_id(task_id)
+
+        if session is not None:
+            status_value = getattr(session.status, "value", str(session.status))
+            result_payload = session.result.model_dump() if hasattr(session.result, "model_dump") else session.result
+            task = update_task_record(
+                task_id,
+                status=session.status,
+                progress=session.progress,
+                stage=session.stage,
+                result=result_payload if status_value == "completed" and isinstance(result_payload, dict) else None,
+                error=session.error,
+                structure=session.structure,
+                title=session.title,
+                preview=session.preview,
+                source_ref=session.source_ref,
+            )
+            task.update(
+                {
+                    "task_id": task_id,
+                    "session_id": session.session_id,
+                    "job_id": session.job_id or task_id,
+                    "type": getattr(session.type, "value", str(session.type)),
+                }
+            )
+            if status_value != "completed":
+                task["result"] = None
+            task.pop("partial_result", None)
+            return JSONResponse(content=jsonable_encoder(task))
+
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+        if task.get("status") != "completed":
+            task["result"] = None
+        task.pop("partial_result", None)
+        return JSONResponse(content=jsonable_encoder(task))
 
     return app
 

@@ -22,7 +22,7 @@ logger = get_logger("services.llm_handler")
 
 _VALID_LLM_MODES = {"offline", "online", "smart"}
 _CHAT_CONCURRENCY_LIMIT = 3
-_CHAT_RETRY_ATTEMPTS = 3
+_CHAT_RETRY_ATTEMPTS = 1
 _CHAT_RETRY_BASE_DELAY_SECONDS = 1.0
 _CHAT_LLM_SEMAPHORE = asyncio.Semaphore(_CHAT_CONCURRENCY_LIMIT)
 _LLM_CIRCUIT_BREAKER = {
@@ -36,8 +36,12 @@ _LLM_METRICS = {
     "llm_errors_total": 0,
     "llm_latency_ms": [],
 }
+_MIN_TIMEOUT_SECONDS = 3.0
+_MAX_TIMEOUT_SECONDS = 90.0
+_SYNC_RETRY_ATTEMPTS = 1
+LLM_TIMEOUT_BACKGROUND = "LLM_TIMEOUT_BACKGROUND"
 
-_JSON_BLOCK_RE = re.compile(r"\{[\s\S]*\}")
+_JSON_FENCE_RE = re.compile(r"```(?:json)?", re.IGNORECASE)
 
 SYSTEM_PROMPT = (
     "You are a strict code analysis engine.\n"
@@ -47,39 +51,56 @@ SYSTEM_PROMPT = (
     "Rules:\n"
     "- Output JSON ONLY\n"
     "- No explanations, no markdown, no text outside JSON\n"
+    "- No duplicate outputs and no multiple JSON objects\n"
     "- No hallucination - use ONLY provided input\n"
     "- Keep answers SHORT and PRECISE\n"
 )
 
 
-def _extract_json_candidate(raw: str) -> str | None:
-    cleaned = re.sub(r"```(?:json)?", "", raw, flags=re.IGNORECASE).replace("```", "").strip()
-    if not cleaned:
-        return None
+class LLMBackgroundTimeoutError(Exception):
+    """Raised when the LLM call exceeds the safe async wait budget but may still complete elsewhere."""
 
-    direct_match = _JSON_BLOCK_RE.search(cleaned)
-    if direct_match:
-        return direct_match.group(0).strip()
+
+def _clean_raw_llm_text(raw: str) -> str:
+    cleaned = _JSON_FENCE_RE.sub("", str(raw or "")).replace("```", "").strip()
+    cleaned = cleaned.replace("\ufeff", "").strip()
+    return cleaned
+
+
+def _extract_json_candidates(raw: str) -> list[str]:
+    cleaned = _clean_raw_llm_text(raw)
+    if not cleaned:
+        return []
+
+    candidates: list[str] = []
+    brace_count = 0
+    start_index: int | None = None
+    for index, char in enumerate(cleaned):
+        if char == "{":
+            if brace_count == 0:
+                start_index = index
+            brace_count += 1
+        elif char == "}":
+            if brace_count == 0:
+                continue
+            brace_count -= 1
+            if brace_count == 0 and start_index is not None:
+                candidates.append(cleaned[start_index:index + 1].strip())
+                start_index = None
+
+    if candidates:
+        return candidates
 
     start = cleaned.find("{")
     if start == -1:
-        return None
+        return []
 
-    brace_count = 0
-    end = None
-    for index, char in enumerate(cleaned[start:], start=start):
-        if char == "{":
-            brace_count += 1
-        elif char == "}":
-            brace_count -= 1
-            if brace_count == 0:
-                end = index + 1
-                break
+    return [cleaned[start:].strip()]
 
-    if end is not None:
-        return cleaned[start:end].strip()
 
-    return cleaned[start:].strip()
+def _extract_json_candidate(raw: str) -> str | None:
+    candidates = _extract_json_candidates(raw)
+    return candidates[-1] if candidates else None
 
 
 def _repair_json(candidate: str) -> str:
@@ -94,23 +115,44 @@ def _repair_json(candidate: str) -> str:
 
 
 def _parse_json_response(raw: str) -> dict[str, Any]:
-    candidate = _extract_json_candidate(raw)
-    if not candidate:
-        raise ValueError("No JSON object found in response")
+    cleaned = _clean_raw_llm_text(raw)
 
-    try:
-        parsed = json.loads(candidate)
-    except json.JSONDecodeError:
-        parsed = json.loads(_repair_json(candidate))
+    candidates = _extract_json_candidates(cleaned)
+    if not candidates:
+        logger.error("LLM parsing failed: no JSON candidate found")
+        raise ValueError("INVALID_FINAL_RESULT")
 
-    if not isinstance(parsed, dict):
-        raise ValueError("LLM response JSON is not an object")
+    parse_errors: list[str] = []
+    for candidate in reversed(candidates):
+        attempted_candidates = [candidate]
+        repaired = _repair_json(candidate)
+        if repaired != candidate:
+            attempted_candidates.append(repaired)
 
-    return parsed
+        for current in attempted_candidates:
+            try:
+                parsed = json.loads(current)
+                if not isinstance(parsed, dict):
+                    parse_errors.append("Parsed JSON was not an object")
+                    continue
+                return parsed
+            except json.JSONDecodeError as exc:
+                parse_errors.append(str(exc))
+
+    logger.error(
+        "LLM parsing failed",
+        extra={"extra_data": {"errors": parse_errors, "candidate_preview": candidates[-1][:500]}},
+    )
+    raise ValueError("INVALID_FINAL_RESULT")
 
 
 def parse_llm_json(text: str) -> dict[str, Any]:
     return _parse_json_response(text)
+
+
+def _looks_like_timeout_error(error: Exception | str | None) -> bool:
+    message = str(error or "").lower()
+    return "timed out" in message or LLM_TIMEOUT_BACKGROUND.lower() in message
 
 
 def get_llm_metrics() -> dict[str, Any]:
@@ -147,10 +189,15 @@ def _normalize_mode(mode: str | None) -> str:
     return candidate
 
 
+def _normalize_timeout(timeout: int | float | None, default_timeout: int | float) -> float:
+    candidate = float(timeout or default_timeout)
+    return max(_MIN_TIMEOUT_SECONDS, min(candidate, _MAX_TIMEOUT_SECONDS))
+
+
 def generate_response(prompt: str, mode: str = "offline", timeout: int | float | None = None) -> str:
     settings = get_settings()
     selected_mode = _normalize_mode(mode)
-    request_timeout = max(60.0, min(float(timeout or settings.LLM_TIMEOUT_SECONDS), 90.0))
+    request_timeout = _normalize_timeout(timeout, settings.LLM_TIMEOUT_SECONDS)
     started = time.monotonic()
     _LLM_METRICS["llm_requests_total"] += 1
 
@@ -194,14 +241,12 @@ def generate_response(prompt: str, mode: str = "offline", timeout: int | float |
 
 def generate_chat_response(prompt: str, mode: str = "online", timeout: int | float | None = None) -> str:
     started = time.monotonic()
-    print(f"[CHAT LLM] PROMPT: {prompt[:500]}")
     response = generate_response(prompt, mode=mode, timeout=timeout)
     cleaned = str(response or "").strip()
     if not cleaned:
         raise Exception("LLM returned empty response")
 
     elapsed_ms = round((time.monotonic() - started) * 1000, 2)
-    print(f"[CHAT LLM] RESPONSE: {cleaned[:1000]}")
     logger.info(
         "LLM chat response generated",
         extra={"extra_data": {
@@ -219,8 +264,7 @@ async def generate_chat_response_async(
     timeout: int | float | None = None,
 ) -> str:
     settings = get_settings()
-    requested_timeout = float(timeout or settings.LLM_TIMEOUT_SECONDS)
-    effective_timeout = max(60.0, min(requested_timeout, 90.0))
+    effective_timeout = _normalize_timeout(timeout, settings.LLM_TIMEOUT_SECONDS)
     last_error: Exception | None = None
     overall_started = time.monotonic()
 
@@ -233,12 +277,18 @@ async def generate_chat_response_async(
                     timeout=effective_timeout + 5.0,
                 )
                 latency_ms = round((time.monotonic() - attempt_started) * 1000, 2)
-                print(f"[CHAT LLM] Attempt {attempt} latency: {latency_ms}ms")
+                logger.info(
+                    "Chat LLM attempt succeeded",
+                    extra={"extra_data": {
+                        "attempt": attempt,
+                        "mode": _normalize_mode(mode),
+                        "latency_ms": latency_ms,
+                    }},
+                )
                 return response
             except Exception as exc:
                 last_error = exc if isinstance(exc, Exception) else Exception(str(exc))
                 latency_ms = round((time.monotonic() - attempt_started) * 1000, 2)
-                print(f"[CHAT LLM] Attempt {attempt} failed after {latency_ms}ms: {last_error}")
                 logger.error(
                     "Chat LLM attempt failed",
                     extra={"extra_data": {
@@ -253,7 +303,7 @@ async def generate_chat_response_async(
                     await asyncio.sleep(wait_time)
 
     raise Exception(
-        f"LLM failed after 3 attempts: mode={_normalize_mode(mode)}, "
+        f"LLM failed after {_CHAT_RETRY_ATTEMPTS} attempt(s): mode={_normalize_mode(mode)}, "
         f"latency_ms={round((time.monotonic() - overall_started) * 1000, 2)}, error={last_error}"
     )
 
@@ -268,26 +318,35 @@ def call_llm_with_retry(
     settings = get_settings()
     selected_mode = _normalize_mode(mode)
     effective_prompt = simplified_prompt or _build_prompt(prompt)
-    request_timeout = max(60, int(timeout or settings.LLM_TIMEOUT_SECONDS))
+    request_timeout = int(_normalize_timeout(timeout, settings.LLM_TIMEOUT_SECONDS))
     started = time.monotonic()
     last_error: Exception | None = None
 
-    print(f"[LLM] Starting call: mode={selected_mode}, timeout={request_timeout}s, context_size={len(effective_prompt)}")
-
-    for attempt in range(3):
+    max_attempts = max(1, int(settings.LLM_MAX_RETRIES or _SYNC_RETRY_ATTEMPTS))
+    for attempt in range(max_attempts):
         try:
+            logger.info(
+                "LLM start",
+                extra={"extra_data": {"attempt": attempt + 1, "mode": selected_mode}},
+            )
             raw = generate_response(effective_prompt, mode=selected_mode, timeout=request_timeout)
             if not raw or not str(raw).strip():
                 raise Exception("LLM returned empty response")
 
-            parsed = _parse_json_response(raw)
+            try:
+                parsed = _parse_json_response(raw)
+            except Exception:
+                raise Exception("INVALID_FINAL_RESULT")
             parsed["_llm_attempts"] = attempt + 1
             parsed["_llm_mode"] = selected_mode
             parsed["_llm_response_time_ms"] = round((time.monotonic() - started) * 1000, 2)
+            logger.info(
+                "LLM success",
+                extra={"extra_data": {"attempt": attempt + 1, "mode": selected_mode}},
+            )
             return parsed
         except Exception as error:
             last_error = error if isinstance(error, Exception) else Exception(str(error))
-            print(f"LLM attempt {attempt + 1} failed:", last_error)
             logger.error(
                 "LLM attempt failed",
                 extra={"extra_data": {
@@ -296,9 +355,13 @@ def call_llm_with_retry(
                     "error": str(last_error),
                 }},
             )
+            if attempt < max_attempts - 1:
+                backoff_seconds = _CHAT_RETRY_BASE_DELAY_SECONDS * (2 ** attempt)
+                time.sleep(backoff_seconds)
 
-    print("LLM ERROR:", last_error)
-    raise Exception(f"LLM failed after 3 attempts: {last_error}")
+    if _looks_like_timeout_error(last_error):
+        raise LLMBackgroundTimeoutError(LLM_TIMEOUT_BACKGROUND)
+    raise Exception(f"LLM failed after {max_attempts} attempt(s): {last_error}")
 
 
 def call_llm(
@@ -325,10 +388,18 @@ async def call_llm_async(
     mode: str | None = None,
 ) -> dict[str, Any]:
     _ = fallback_context
-    return await asyncio.to_thread(
-        call_llm_with_retry,
-        prompt,
-        timeout=timeout,
-        simplified_prompt=simplified_prompt,
-        mode=mode,
-    )
+    settings = get_settings()
+    effective_timeout = _normalize_timeout(timeout, settings.LLM_TIMEOUT_SECONDS)
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                call_llm_with_retry,
+                prompt,
+                timeout=int(effective_timeout),
+                simplified_prompt=simplified_prompt,
+                mode=mode,
+            ),
+            timeout=effective_timeout + 5.0,
+        )
+    except asyncio.TimeoutError as exc:
+        raise LLMBackgroundTimeoutError(LLM_TIMEOUT_BACKGROUND) from exc

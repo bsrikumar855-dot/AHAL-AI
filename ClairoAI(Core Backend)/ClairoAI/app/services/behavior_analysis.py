@@ -51,7 +51,7 @@ def analyze_system_behavior(
     if behavior_signals.get("scores_truth"):
         key_capabilities.append("Scores confidence, truthfulness, or risk")
     if behavior_signals.get("multi_agent"):
-        key_capabilities.append("Coordinates multiple AI or logic agents across a staged pipeline")
+        key_capabilities.append("Coordinates multiple analysis components across a staged pipeline")
 
     if not key_capabilities:
         if features:
@@ -66,7 +66,7 @@ def analyze_system_behavior(
         workflow = (
             "Input is analyzed for claims, evidence is gathered or referenced, verification logic evaluates reliability, and scored findings are returned as explainable output."
         )
-        system_type = "AI-powered verification / hallucination detection system"
+        system_type = "verification and hallucination detection system"
     elif domain.lower() == "developer tools":
         core_behavior = (
             "Transforms opaque codebases into actionable execution insight by tracing flows, responsibilities, and risk signals."

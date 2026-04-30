@@ -2,9 +2,13 @@
 File upload handler for .zip project uploads.
 """
 
+import asyncio
+import gc
 import os
 import shutil
 import tempfile
+import time
+import uuid
 import zipfile
 from pathlib import Path
 from typing import Dict
@@ -37,17 +41,70 @@ class FileHandler:
     def __init__(self):
         self.settings = get_settings()
 
+    def _is_windows_lock_error(self, error: Exception) -> bool:
+        return isinstance(error, PermissionError) or getattr(error, "winerror", None) == 32
+
+    def _safe_delete(self, path: str) -> None:
+        if not path:
+            return
+        for attempt in range(1, 4):
+            if not os.path.exists(path):
+                return
+            try:
+                logger.info("Deleting temp file", extra={"extra_data": {"path": path, "attempt": attempt}})
+                os.remove(path)
+                return
+            except Exception as exc:
+                logger.warning(
+                    "Temp file delete failed",
+                    extra={"extra_data": {"path": path, "attempt": attempt, "error": str(exc)}},
+                )
+                if attempt >= 3 or not self._is_windows_lock_error(exc):
+                    return
+                time.sleep(0.75 * attempt)
+
+    def _safe_rmtree(self, path: str) -> None:
+        if not path:
+            return
+        for attempt in range(1, 4):
+            if not os.path.exists(path):
+                return
+            try:
+                logger.info("Removing temp directory", extra={"extra_data": {"path": path, "attempt": attempt}})
+                time.sleep(0.5)
+                shutil.rmtree(path, ignore_errors=True)
+                if not os.path.exists(path):
+                    return
+            except Exception as exc:
+                logger.warning(
+                    "Temp directory cleanup failed",
+                    extra={"extra_data": {"path": path, "attempt": attempt, "error": str(exc)}},
+                )
+                if attempt >= 3 or not self._is_windows_lock_error(exc):
+                    return
+            time.sleep(0.75 * attempt)
+
     async def process_upload(self, file_bytes: bytes, filename: str) -> Dict[str, str]:
+        return await asyncio.to_thread(self._process_upload_sync, file_bytes, filename)
+
+    def _process_upload_sync(self, file_bytes: bytes, filename: str) -> Dict[str, str]:
         self._validate_upload(file_bytes, filename)
         temp_dir = tempfile.mkdtemp(prefix="contextbridge_")
+        zip_path = os.path.join(temp_dir, f"{uuid.uuid4().hex}.zip")
+        extract_dir = os.path.join(temp_dir, f"extract_{uuid.uuid4().hex}")
+        logger.info(
+            "Created upload temp paths",
+            extra={"extra_data": {"filename": filename, "temp_dir": temp_dir, "zip_path": zip_path, "extract_dir": extract_dir}},
+        )
 
         try:
-            zip_path = os.path.join(temp_dir, "upload.zip")
             with open(zip_path, "wb") as file_handle:
                 file_handle.write(file_bytes)
 
-            extract_dir = os.path.join(temp_dir, "extracted")
             self._safe_extract(zip_path, extract_dir)
+            gc.collect()
+            time.sleep(0.5)
+            self._safe_delete(zip_path)
 
             file_contents = self._collect_files(extract_dir)
             if not file_contents:
@@ -67,7 +124,9 @@ class FileHandler:
             logger.error(f"Upload processing failed: {error}")
             raise FileProcessingError(f"Failed to process upload: {str(error)}")
         finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            self._safe_delete(zip_path)
+            self._safe_rmtree(extract_dir)
+            self._safe_rmtree(temp_dir)
 
     def _validate_upload(self, file_bytes: bytes, filename: str) -> None:
         if not filename.lower().endswith(".zip"):
@@ -92,21 +151,34 @@ class FileHandler:
 
     def _safe_extract(self, zip_path: str, extract_dir: str) -> None:
         os.makedirs(extract_dir, exist_ok=True)
+        logger.info("Extracting upload archive", extra={"extra_data": {"zip_path": zip_path, "extract_dir": extract_dir}})
+        for attempt in range(1, 4):
+            try:
+                with zipfile.ZipFile(zip_path, "r") as zip_file:
+                    for member in zip_file.namelist():
+                        member_path = Path(extract_dir) / member
+                        try:
+                            member_path.resolve().relative_to(Path(extract_dir).resolve())
+                        except ValueError:
+                            logger.warning(f"Skipping suspicious path: {member}")
+                            continue
 
-        with zipfile.ZipFile(zip_path, "r") as zip_file:
-            for member in zip_file.namelist():
-                member_path = Path(extract_dir) / member
-                try:
-                    member_path.resolve().relative_to(Path(extract_dir).resolve())
-                except ValueError:
-                    logger.warning(f"Skipping suspicious path: {member}")
-                    continue
+                        parts = Path(member).parts
+                        if any(part in SKIP_DIRECTORIES for part in parts):
+                            continue
 
-                parts = Path(member).parts
-                if any(part in SKIP_DIRECTORIES for part in parts):
-                    continue
-
-                zip_file.extract(member, extract_dir)
+                        zip_file.extract(member, extract_dir)
+                gc.collect()
+                time.sleep(0.5)
+                return
+            except Exception as exc:
+                logger.warning(
+                    "Upload extraction attempt failed",
+                    extra={"extra_data": {"zip_path": zip_path, "extract_dir": extract_dir, "attempt": attempt, "error": str(exc)}},
+                )
+                if attempt >= 3 or not self._is_windows_lock_error(exc):
+                    raise
+                time.sleep(1.0 * attempt)
 
     def _collect_files(self, extract_dir: str) -> Dict[str, str]:
         file_contents: Dict[str, str] = {}

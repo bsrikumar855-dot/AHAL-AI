@@ -9,6 +9,7 @@ database driver directly.
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 import uuid
+from pydantic import ValidationError
 
 from app.db.mongodb import mongodb
 from app.db.models import (
@@ -31,6 +32,7 @@ from app.core.logging import get_logger
 
 logger = get_logger("db.repository")
 _INVALID_SESSION_IDS = {"", "error-no-db", "fallback-session", "default", "error", "none", "null"}
+_WORKFLOW_FIELDS = ("initialization", "request_flow", "processing_flow", "response_flow")
 
 
 def ensure_valid_session_id(session_id: Optional[str]) -> str:
@@ -39,6 +41,41 @@ def ensure_valid_session_id(session_id: Optional[str]) -> str:
     if candidate.lower() in _INVALID_SESSION_IDS:
         return str(uuid.uuid4())
     return candidate
+
+
+def _ensure_str_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return [cleaned] if cleaned else []
+    return []
+
+
+def _coerce_session_workflow_shape(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Repair legacy session payloads that stored workflow stages as strings."""
+    repaired = dict(doc)
+    result = repaired.get("result")
+    if not isinstance(result, dict):
+        return repaired
+
+    workflow = result.get("system_workflow")
+    workflow_dict = workflow if isinstance(workflow, dict) else {}
+    result["system_workflow"] = {
+        field: _ensure_str_list(workflow_dict.get(field))
+        for field in _WORKFLOW_FIELDS
+    }
+    repaired["result"] = result
+    return repaired
+
+
+def _parse_session_document(doc: Dict[str, Any]) -> SessionDocument:
+    try:
+        return SessionDocument(**doc)
+    except ValidationError as exc:
+        logger.warning(f"Repairing legacy workflow shape for session {doc.get('session_id')}: {exc.errors()}")
+        repaired = _coerce_session_workflow_shape(doc)
+        return SessionDocument(**repaired)
 
 
 class SummaryRepository:
@@ -264,10 +301,37 @@ class RepoRepository:
     @classmethod
     async def create(cls, repo: RepoDocument) -> str:
         doc = repo.model_dump()
-        doc["_id"] = doc.pop("repo_id")
-        await cls._collection().insert_one(doc)
-        logger.info(f"Created repo {doc['_id']}")
-        return doc["_id"]
+        repo_id = doc.pop("repo_id")
+        repo_url = str(doc.get("repo_url", "")).strip()
+        doc["updated_at"] = datetime.now(timezone.utc)
+
+        existing = await cls._collection().find_one({"repo_url": repo_url}) if repo_url else None
+        if existing:
+            await cls._collection().update_one(
+                {"_id": existing["_id"]},
+                {
+                    "$set": doc,
+                    "$setOnInsert": {"created_at": doc.get("created_at", datetime.now(timezone.utc))},
+                },
+                upsert=False,
+            )
+            logger.info(f"Updated existing repo for repo_url: {repo_url}")
+            return str(existing["_id"])
+
+        doc["_id"] = repo_id
+        await cls._collection().update_one(
+            {"repo_url": repo_url},
+            {
+                "$set": doc,
+                "$setOnInsert": {
+                    "_id": repo_id,
+                    "created_at": doc.get("created_at", datetime.now(timezone.utc)),
+                },
+            },
+            upsert=True,
+        )
+        logger.info(f"Created repo {repo_id}")
+        return repo_id
 
     @classmethod
     async def get_by_id(cls, repo_id: str) -> Optional[RepoDocument]:
@@ -420,7 +484,7 @@ class SessionRepository:
         if doc is None:
             return None
         doc["session_id"] = doc.pop("_id")
-        return SessionDocument(**doc)
+        return _parse_session_document(doc)
 
     @classmethod
     async def get_by_job_id(cls, job_id: str) -> Optional[SessionDocument]:
@@ -429,7 +493,7 @@ class SessionRepository:
         if doc is None:
             return None
         doc["session_id"] = doc.pop("_id")
-        return SessionDocument(**doc)
+        return _parse_session_document(doc)
 
     @classmethod
     async def update_status(
@@ -454,7 +518,6 @@ class SessionRepository:
             updates["result"] = result
         if error is not None:
             updates["error"] = error
-
         res = await cls._collection().update_one(
             {"_id": session_id},
             {"$set": updates},
@@ -492,7 +555,6 @@ class SessionRepository:
         }
         if result is not None:
             updates["result"] = result
-
         res = await cls._collection().update_one(
             {"_id": session_id},
             {"$set": updates},
@@ -524,9 +586,16 @@ class SessionRepository:
         sessions = []
         async for doc in cursor:
             doc["session_id"] = doc.pop("_id")
-            sessions.append(SessionDocument(**doc))
+            sessions.append(_parse_session_document(doc))
 
         return sessions, total
+
+    @classmethod
+    async def delete_by_id(cls, session_id: str) -> bool:
+        """Delete a session by ID."""
+        res = await cls._collection().delete_one({"_id": session_id})
+        logger.info(f"Session {session_id} deleted")
+        return res.deleted_count > 0
 
 
 class ProjectKnowledgeRepository:

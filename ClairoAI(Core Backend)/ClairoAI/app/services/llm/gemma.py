@@ -110,11 +110,9 @@ class GemmaProvider(BaseLLMProvider):
                     f"LLM call attempt {attempt + 1}",
                     extra={"extra_data": {"model": model, "url": url}},
                 )
-                print("Sending request to LLM...")
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
                     response = await client.post(url, json=payload)
                     response.raise_for_status()
-                print("LLM response received")
 
                 data = response.json()
                 generated = data.get("response", "").strip()
@@ -122,7 +120,6 @@ class GemmaProvider(BaseLLMProvider):
                 if not generated:
                     raise LLMError("LLM returned empty response")
 
-                print("LLM RAW OUTPUT:", generated[:500])
                 logger.info(
                     "LLM call succeeded",
                     extra={"extra_data": {
@@ -135,15 +132,12 @@ class GemmaProvider(BaseLLMProvider):
 
             except httpx.TimeoutException as e:
                 last_error = e
-                print("LLM ERROR:", str(e))
                 logger.warning(f"LLM timeout (attempt {attempt + 1})")
             except httpx.HTTPStatusError as e:
                 last_error = e
-                print("LLM ERROR:", str(e))
                 logger.warning(f"LLM HTTP error: {e.response.status_code}")
             except Exception as e:
                 last_error = e
-                print("LLM ERROR:", str(e))
                 logger.warning(f"LLM call error: {e}")
 
         raise LLMError(f"LLM call failed after {1 + self.max_retries} attempts: {last_error}")
@@ -207,7 +201,7 @@ class GemmaProvider(BaseLLMProvider):
 
             return parsed
         except Exception as e:
-            print("LLM ERROR:", str(e))
+            logger.warning(f"LLM summarize failed: {e}")
             return {
                 "what_done": {"text": "LLM failed", "confidence": 0.0},
                 "why_done": {"text": str(e), "confidence": 0.0},
@@ -231,7 +225,7 @@ class GemmaProvider(BaseLLMProvider):
 
             return parsed
         except Exception as e:
-            print("LLM ERROR:", str(e))
+            logger.warning(f"LLM answer failed: {e}")
             return {
                 "answer": "LLM failed to generate answer",
                 "confidence": 0.0,
@@ -243,7 +237,7 @@ class GemmaProvider(BaseLLMProvider):
             raw_response = await self._call_ollama(prompt)
             return self._parse_json_response(raw_response)
         except Exception as e:
-            print("LLM ERROR:", str(e))
+            logger.warning(f"LLM structured generation failed: {e}")
             return {
                 "project_goal": "LLM failed",
                 "key_modules": [],

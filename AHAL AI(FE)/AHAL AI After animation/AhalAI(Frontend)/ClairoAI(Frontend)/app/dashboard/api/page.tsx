@@ -26,6 +26,7 @@ export default function RepoAnalysisPage() {
   const [repoUrl, setRepoUrl] = useState("");
   const { result, loading, error, sessionId, progress, stage, status, analyze, reset } =
     useRepoAnalyze();
+  const stageLabel = stage || "uploading";
 
   const isValidRepoUrl = useMemo(() => {
     try {
@@ -193,7 +194,7 @@ export default function RepoAnalysisPage() {
             {loading ? (
               <>
                 <div className="h-4 w-4 animate-spin rounded-full border-2 border-sky-200/20 border-t-sky-200" />
-                Analyzing Repo...
+                {stageLabel}
               </>
             ) : (
               <>
@@ -213,7 +214,7 @@ export default function RepoAnalysisPage() {
         >
           <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0 text-amber-400" />
           <div>
-            <p className="text-sm font-medium text-amber-200">Partial analysis completed</p>
+            <p className="text-sm font-medium text-amber-200">Analysis failed</p>
             <p className="mt-0.5 text-xs text-amber-200/70">{error}</p>
           </div>
         </motion.div>
@@ -228,10 +229,10 @@ export default function RepoAnalysisPage() {
           <div className="flex items-center justify-between gap-4">
             <div>
               <p className="text-sm font-medium text-sky-100">
-                {progress < 15 ? "Preparing repository analysis..." : "Analyzing repository..."}
+                {stageLabel}
               </p>
               <p className="mt-1 text-xs text-sky-200/75">
-                {stage || "Analyzing deeply, this may take a few seconds..."}
+                Polling progress every second
               </p>
             </div>
             <p className="text-sm font-semibold text-sky-200">{progress}%</p>

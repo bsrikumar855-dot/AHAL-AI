@@ -164,8 +164,31 @@ class SummaryBlocks(BaseModel):
     issues: list[str] = Field(default_factory=list)
 
 
+class SummaryPayload(BaseModel):
+    """Exact semantic summary payload mirrored across API and UI."""
+    what: str = ""
+    why: str = ""
+
+
+class SystemWorkflow(BaseModel):
+    """Structured system workflow grouped by lifecycle stage."""
+    initialization: list[str] = Field(default_factory=list)
+    request_flow: list[str] = Field(default_factory=list)
+    processing_flow: list[str] = Field(default_factory=list)
+    response_flow: list[str] = Field(default_factory=list)
+
+
 class UnifiedResult(BaseModel):
     """Unified output schema for all session types."""
+    overview: str = ""
+    project_type: str = ""
+    tech_stack: list[str] = Field(default_factory=list)
+    folder_structure: list[dict[str, str]] = Field(default_factory=list)
+    core_modules: list[dict[str, str]] = Field(default_factory=list)
+    execution_flow: list[str] = Field(default_factory=list)
+    dependencies: list[dict[str, str]] = Field(default_factory=list)
+    issues: list[str] = Field(default_factory=list)
+    improvements: list[str] = Field(default_factory=list)
     project_goal: str = ""
     architecture_style: str = ""
     domain: str = ""
@@ -184,17 +207,18 @@ class UnifiedResult(BaseModel):
     fact_modules: list[str] = Field(default_factory=list)
     fact_actions: list[str] = Field(default_factory=list)
     fact_flow: str = ""
-    project_type: str = ""
     project_goal_confidence: str = ""
     key_modules: list[str] = Field(default_factory=list)
     core_features: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
+    system_workflow: SystemWorkflow = Field(default_factory=SystemWorkflow)
     workflows: list[dict] = Field(default_factory=list)
     dependency_graph: dict = Field(default_factory=dict)
-    insights: list[str] = Field(default_factory=list)
+    insights: list[dict[str, str]] = Field(default_factory=list)
     confidence_score: int = Field(default=0, ge=0, le=100)
     confidence_reasons: list[str] = Field(default_factory=list)
     summary_blocks: SummaryBlocks = Field(default_factory=SummaryBlocks)
+    summary: SummaryPayload = Field(default_factory=SummaryPayload)
 
 
 class SessionDocument(BaseModel):
@@ -251,7 +275,7 @@ class ProjectKnowledgeDocument(BaseModel):
     key_modules: list[str] = Field(default_factory=list)
     core_features: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
-    insights: list[str] = Field(default_factory=list)
+    insights: list[dict[str, str]] = Field(default_factory=list)
     confidence_score: int = Field(default=0, ge=0, le=100)
     confidence_reasons: list[str] = Field(default_factory=list)
     tech_stack: list[str] = Field(default_factory=list)

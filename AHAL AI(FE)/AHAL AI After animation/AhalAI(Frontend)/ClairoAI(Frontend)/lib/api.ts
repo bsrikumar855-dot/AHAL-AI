@@ -5,6 +5,7 @@ import type {
   ChatResponse,
   SessionIntelligenceResponse,
   SessionReportResponse,
+  SessionResultResponse,
   SessionHistoryResponse,
   SessionStatusResponse,
 } from "@/types";
@@ -12,6 +13,9 @@ import { createFreshSessionId, getOrCreateSessionId, setSessionId } from "@/lib/
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000/api/v1";
 const GENERIC_ERROR_MESSAGE = "Something went wrong. Please try again.";
+const DEFAULT_REQUEST_TIMEOUT_MS = 90000;
+const ANALYZE_REQUEST_TIMEOUT_MS = 5000;
+const POLL_REQUEST_TIMEOUT_MS = 30000;
 export type ChatMode = "code" | "folder" | "repo";
 
 export class ApiClientError extends Error {
@@ -24,8 +28,23 @@ export class ApiClientError extends Error {
   }
 }
 
+export function isBackgroundProcessingMessage(message: string | null | undefined) {
+  const normalized = String(message || "").toLowerCase();
+  return normalized.includes("timeout")
+    || normalized.includes("abort")
+    || normalized.includes("aborted")
+    || normalized.includes("still running")
+    || normalized.includes("background")
+    || normalized.includes("llm_timeout_background");
+}
+
 function buildUrl(endpoint: string) {
   return `${API_BASE}${endpoint}`;
+}
+
+function buildFreshUrl(endpoint: string) {
+  const joiner = endpoint.includes("?") ? "&" : "?";
+  return buildUrl(`${endpoint}${joiner}no_cache=true`);
 }
 
 export function buildSessionStreamUrl(sessionId: string) {
@@ -86,15 +105,25 @@ async function parseError(res: Response) {
   return new ApiClientError(finalMessage, res.status);
 }
 
-async function requestJson<T>(endpoint: string, body: Record<string, unknown>): Promise<T> {
+async function fetchWithTimeout(input: string, init: RequestInit, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(buildUrl(endpoint), {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+async function requestJson<T>(endpoint: string, body: Record<string, unknown>, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promise<T> {
+  try {
+    const res = await fetchWithTimeout(buildUrl(endpoint), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
-    });
+    }, timeoutMs);
 
     if (!res.ok) {
       throw await parseError(res);
@@ -103,6 +132,9 @@ async function requestJson<T>(endpoint: string, body: Record<string, unknown>): 
     return (await res.json()) as T;
   } catch (error) {
     console.error("API ERROR:", error);
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new ApiClientError("Request timed out. Analysis is still running in the background.", 408);
+    }
     if (error instanceof Error) {
       throw error;
     }
@@ -110,12 +142,12 @@ async function requestJson<T>(endpoint: string, body: Record<string, unknown>): 
   }
 }
 
-async function requestForm<T>(endpoint: string, formData: FormData): Promise<T> {
+async function requestForm<T>(endpoint: string, formData: FormData, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promise<T> {
   try {
-    const res = await fetch(buildUrl(endpoint), {
+    const res = await fetchWithTimeout(buildUrl(endpoint), {
       method: "POST",
       body: formData,
-    });
+    }, timeoutMs);
 
     if (!res.ok) {
       throw await parseError(res);
@@ -124,6 +156,9 @@ async function requestForm<T>(endpoint: string, formData: FormData): Promise<T> 
     return (await res.json()) as T;
   } catch (error) {
     console.error("API ERROR:", error);
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new ApiClientError("Request timed out. Analysis is still running in the background.", 408);
+    }
     if (error instanceof Error) {
       throw error;
     }
@@ -157,7 +192,7 @@ export async function analyzeCode(code: string, sessionId = getOrCreateSessionId
     code,
     session_id: sessionId,
     mode: "online",
-  });
+  }, ANALYZE_REQUEST_TIMEOUT_MS);
 
   return persistSessionFromResult(result);
 }
@@ -168,7 +203,7 @@ export async function analyzeFolder(file: File, sessionId = getOrCreateSessionId
   formData.append("session_id", sessionId);
   formData.append("mode", "online");
 
-  const result = await requestForm<SessionStatusResponse>("/folder/analyze", formData);
+  const result = await requestForm<SessionStatusResponse>("/folder/analyze", formData, ANALYZE_REQUEST_TIMEOUT_MS);
   return persistSessionFromResult(result);
 }
 
@@ -177,7 +212,7 @@ export async function analyzeRepo(repo_url: string, sessionId = getOrCreateSessi
     repo_url,
     session_id: sessionId,
     mode: "online",
-  });
+  }, ANALYZE_REQUEST_TIMEOUT_MS);
 
   return persistSessionFromResult(result);
 }
@@ -255,9 +290,14 @@ export async function getSessionStatus(
   sessionId: string
 ): Promise<SessionStatusResponse> {
   try {
-    const res = await fetch(buildUrl(`/session/${sessionId}/status`), {
+    const res = await fetchWithTimeout(buildUrl(`/session/${sessionId}/status`), {
       method: "GET",
-    });
+      cache: "no-store",
+      headers: {
+        "Cache-Control": "no-cache, no-store, max-age=0",
+        Pragma: "no-cache",
+      },
+    }, POLL_REQUEST_TIMEOUT_MS);
 
     if (!res.ok) {
       throw await parseError(res);
@@ -266,6 +306,69 @@ export async function getSessionStatus(
     return (await res.json()) as SessionStatusResponse;
   } catch (error) {
     console.error("API ERROR:", error);
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new ApiClientError("Status request timed out. Background analysis may still be running.", 408);
+    }
+    if (error instanceof Error) {
+      throw error;
+    }
+    throw new ApiClientError(GENERIC_ERROR_MESSAGE, 500);
+  }
+}
+
+export async function getJobStatus(
+  jobId: string
+): Promise<SessionStatusResponse> {
+  try {
+    const res = await fetchWithTimeout(buildFreshUrl(`/status/${jobId}`), {
+      method: "GET",
+      cache: "no-store",
+      headers: {
+        "Cache-Control": "no-cache, no-store, max-age=0",
+        Pragma: "no-cache",
+      },
+    }, POLL_REQUEST_TIMEOUT_MS);
+
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+
+    return (await res.json()) as SessionStatusResponse;
+  } catch (error) {
+    console.error("API ERROR:", error);
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new ApiClientError("Status request timed out. Analysis is still running in the background.", 408);
+    }
+    if (error instanceof Error) {
+      throw error;
+    }
+    throw new ApiClientError(GENERIC_ERROR_MESSAGE, 500);
+  }
+}
+
+export async function getJobResult(
+  jobId: string
+): Promise<SessionResultResponse> {
+  try {
+    const res = await fetchWithTimeout(buildFreshUrl(`/session/result/${jobId}`), {
+      method: "GET",
+      cache: "no-store",
+      headers: {
+        "Cache-Control": "no-cache, no-store, max-age=0",
+        Pragma: "no-cache",
+      },
+    }, POLL_REQUEST_TIMEOUT_MS);
+
+    if (!res.ok && res.status !== 202) {
+      throw await parseError(res);
+    }
+
+    return (await res.json()) as SessionResultResponse;
+  } catch (error) {
+    console.error("API ERROR:", error);
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new ApiClientError("Result request timed out. Analysis is still finalizing.", 408);
+    }
     if (error instanceof Error) {
       throw error;
     }
@@ -279,6 +382,11 @@ export async function getSessionReport(
   try {
     const res = await fetch(buildUrl(`/session/${sessionId}/report`), {
       method: "GET",
+      cache: "no-store",
+      headers: {
+        "Cache-Control": "no-cache, no-store, max-age=0",
+        Pragma: "no-cache",
+      },
     });
 
     if (!res.ok) {
@@ -299,8 +407,13 @@ export async function getSessionIntelligence(
   sessionId: string
 ): Promise<SessionIntelligenceResponse> {
   try {
-    const res = await fetch(buildUrl(`/session/${sessionId}/intelligence`), {
+    const res = await fetch(buildFreshUrl(`/session/${sessionId}/intelligence`), {
       method: "GET",
+      cache: "no-store",
+      headers: {
+        "Cache-Control": "no-cache, no-store, max-age=0",
+        Pragma: "no-cache",
+      },
     });
 
     if (!res.ok) {
@@ -308,6 +421,26 @@ export async function getSessionIntelligence(
     }
 
     return (await res.json()) as SessionIntelligenceResponse;
+  } catch (error) {
+    console.error("API ERROR:", error);
+    if (error instanceof Error) {
+      throw error;
+    }
+    throw new ApiClientError(GENERIC_ERROR_MESSAGE, 500);
+  }
+}
+
+export async function deleteSession(sessionId: string): Promise<{ ok: boolean; session_id: string }> {
+  try {
+    const res = await fetch(buildUrl(`/session/${sessionId}`), {
+      method: "DELETE",
+    });
+
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+
+    return (await res.json()) as { ok: boolean; session_id: string };
   } catch (error) {
     console.error("API ERROR:", error);
     if (error instanceof Error) {

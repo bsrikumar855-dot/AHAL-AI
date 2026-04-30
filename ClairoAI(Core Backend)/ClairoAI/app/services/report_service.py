@@ -131,7 +131,7 @@ def _infer_core_modules(result: Dict[str, Any], knowledge_snapshot: Dict[str, An
     return [
         "main.py -> entry point, API routing, and system orchestration",
         "analyzer.py -> extracts structure, dependencies, and execution logic",
-        "orchestrator.py -> coordinates AI reasoning and the analysis pipeline",
+        "orchestrator.py -> coordinates analysis logic and the processing pipeline",
         "db.py -> handles persistence and session storage",
         "config.py -> manages system configuration and environment",
         "security.py -> ensures safe input handling and validation",
@@ -148,9 +148,9 @@ def _infer_product_features(result: Dict[str, Any]) -> list[str]:
         elif any(token in lowered for token in ("depend", "graph", "relationship")):
             rewritten.append("Dependency graph and module relationship mapping")
         elif any(token in lowered for token in ("summary", "insight", "reason")):
-            rewritten.append("AI-powered insight generation for complex systems")
+            rewritten.append("Structured insight generation for complex systems")
         elif any(token in lowered for token in ("module", "architect", "structure")):
-            rewritten.append("Intelligent codebase understanding and architecture extraction")
+            rewritten.append("Codebase structure understanding and architecture extraction")
         elif any(token in lowered for token in ("chat", "assistant", "context")):
             rewritten.append("Context-aware guidance for faster technical decisions")
         else:
@@ -160,9 +160,9 @@ def _infer_product_features(result: Dict[str, Any]) -> list[str]:
         return _dedupe(rewritten)[:8]
 
     return [
-        "Intelligent codebase understanding and architecture extraction",
+        "Codebase structure understanding and architecture extraction",
         "Automated workflow and execution path detection",
-        "AI-powered insight generation for complex systems",
+        "Structured insight generation for complex systems",
         "Dependency graph and module relationship mapping",
         "Structured summaries for faster developer decision-making",
     ]

@@ -7,6 +7,7 @@ via the FastAPI lifespan context manager.
 """
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+
 from app.core.config import get_settings
 from app.core.logging import get_logger
 
@@ -44,17 +45,113 @@ class MongoDB:
         )
         self.database = self.client[settings.DB_NAME]
 
-        # Verify connectivity (non-fatal — app starts in degraded mode)
         try:
             await self.client.admin.command("ping")
             logger.info("MongoDB connection established")
+        except Exception as e:
+            logger.error(f"MongoDB startup failed: {e}")
+            raise RuntimeError(f"MongoDB startup failed: {e}") from e
+
+        try:
             await self._ensure_indexes()
         except Exception as e:
             logger.warning(
-                f"MongoDB not available at startup: {e}. "
-                "App will start in degraded mode. "
-                "Database operations will fail until MongoDB is reachable."
+                "Mongo index setup failed, continuing startup",
+                exc_info=e,
             )
+
+    async def remove_duplicate_repos(self, collection) -> None:
+        pipeline = [
+            {
+                "$match": {
+                    "repo_url": {"$exists": True, "$type": "string", "$ne": ""},
+                }
+            },
+            {
+                "$sort": {
+                    "created_at": -1,
+                    "_id": -1,
+                }
+            },
+            {
+                "$group": {
+                    "_id": "$repo_url",
+                    "ids": {"$push": "$_id"},
+                    "count": {"$sum": 1},
+                }
+            },
+            {"$match": {"count": {"$gt": 1}}},
+        ]
+
+        duplicates = await collection.aggregate(pipeline).to_list(length=None)
+        for doc in duplicates:
+            ids_to_delete = list(doc.get("ids", []))[1:]
+            if not ids_to_delete:
+                continue
+            result = await collection.delete_many({"_id": {"$in": ids_to_delete}})
+            logger.warning(
+                "Removed duplicate repo documents before unique index creation",
+                extra={
+                    "extra_data": {
+                        "repo_url": doc.get("_id"),
+                        "deleted_count": result.deleted_count,
+                    }
+                },
+            )
+
+    async def _ensure_named_index(self, collection, keys, *, name: str, **options) -> None:
+        existing_indexes = {}
+        async for index in collection.list_indexes():
+            existing_indexes[index.get("name")] = index
+
+        existing = existing_indexes.get(name)
+        normalized_keys = list(keys)
+        expected_unique = bool(options.get("unique", False))
+        expected_sparse = bool(options.get("sparse", False))
+
+        if existing:
+            existing_keys = list((existing.get("key") or {}).items())
+            existing_unique = bool(existing.get("unique", False))
+            existing_sparse = bool(existing.get("sparse", False))
+            if (
+                existing_keys == normalized_keys
+                and existing_unique == expected_unique
+                and existing_sparse == expected_sparse
+            ):
+                return
+
+            logger.warning(
+                "Dropping conflicting MongoDB index before recreation",
+                extra={"extra_data": {"collection": collection.name, "index": name}},
+            )
+            await collection.drop_index(name)
+
+        try:
+            await collection.create_index(normalized_keys, name=name, **options)
+        except Exception as exc:
+            logger.warning(
+                "Index already exists or conflict detected; attempting recovery",
+                extra={"extra_data": {"collection": collection.name, "index": name, "error": str(exc)}},
+            )
+            if collection.name == "repos" and name == "repo_url_unique_dup_key":
+                await self.remove_duplicate_repos(collection)
+            try:
+                await collection.drop_index(name)
+            except Exception:
+                pass
+            try:
+                await collection.create_index(normalized_keys, name=name, **options)
+            except Exception as recreate_exc:
+                logger.warning(
+                    "Mongo index recreation failed; continuing startup",
+                    extra={
+                        "extra_data": {
+                            "collection": collection.name,
+                            "index": name,
+                            "error": str(recreate_exc),
+                        }
+                    },
+                )
 
     async def _ensure_indexes(self) -> None:
         """Create indexes for efficient querying."""
@@ -63,7 +160,6 @@ class MongoDB:
         await summaries.create_index("status")
         await summaries.create_index("flagged_for_review")
         await summaries.create_index("created_at")
-        # Text index for full-text search across summary fields
         await summaries.create_index(
             [
                 ("summary.what_done.text", "text"),
@@ -81,7 +177,14 @@ class MongoDB:
         await jobs.create_index("created_at")
 
         repos = self.database["repos"]
-        await repos.create_index("repo_id", unique=True)
+        await self.remove_duplicate_repos(repos)
+        await self._ensure_named_index(
+            repos,
+            [("repo_url", 1)],
+            name="repo_url_unique_dup_key",
+            unique=True,
+            sparse=True,
+        )
         await repos.create_index("created_at")
 
         files = self.database["files"]
@@ -107,16 +210,26 @@ class MongoDB:
             default_language="english",
         )
 
-        # ── Sessions collection (multi-session architecture) ──
         sessions = self.database["sessions"]
         await sessions.create_index("type")
         await sessions.create_index("status")
         await sessions.create_index("created_at")
-        await sessions.create_index("job_id", sparse=True)
+        await self._ensure_named_index(
+            sessions,
+            [("job_id", 1)],
+            name="job_id_unique_sparse",
+            unique=True,
+            sparse=True,
+        )
         await sessions.create_index("source_ref")
 
         projects = self.database["projects"]
-        await projects.create_index("session_id", unique=True)
+        await self._ensure_named_index(
+            projects,
+            [("session_id", 1)],
+            name="project_session_id_unique",
+            unique=True,
+        )
         await projects.create_index("session_type")
         await projects.create_index("status")
         await projects.create_index("created_at")
@@ -136,11 +249,21 @@ class MongoDB:
         await workflows.create_index("name")
 
         relationships = self.database["relationships"]
-        await relationships.create_index("session_id", unique=True)
+        await self._ensure_named_index(
+            relationships,
+            [("session_id", 1)],
+            name="relationship_session_id_unique",
+            unique=True,
+        )
         await relationships.create_index("session_type")
 
         memory_profiles = self.database["memory_profiles"]
-        await memory_profiles.create_index("session_id", unique=True)
+        await self._ensure_named_index(
+            memory_profiles,
+            [("session_id", 1)],
+            name="memory_profile_session_id_unique",
+            unique=True,
+        )
         await memory_profiles.create_index("session_type")
         await memory_profiles.create_index("updated_at")
 
@@ -174,5 +297,4 @@ class MongoDB:
             return False
 
 
-# Singleton instance — imported across the app
 mongodb = MongoDB()

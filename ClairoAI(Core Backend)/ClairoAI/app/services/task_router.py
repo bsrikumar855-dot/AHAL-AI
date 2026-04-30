@@ -24,7 +24,7 @@ class TaskType(str, Enum):
 # Used ONLY for code/folder/repo analysis.
 # Output MUST be structured product intelligence — never RAG.
 
-PRODUCT_ANALYSIS_PROMPT = """You are a Principal AI System Architect analyzing a software project.
+PRODUCT_ANALYSIS_PROMPT = """You are a strict static analysis engine analyzing a software project.
 
 Analyze the provided source files and return ONLY valid JSON describing the system as a real-world product.
 
@@ -38,8 +38,8 @@ DETECTED STRUCTURE:
 
 OUTPUT (JSON only — no markdown, no explanation):
 {{
-  "project_goal": "2-3 sentence product-level description of what this system does and why it matters",
-  "architecture_style": "specific architecture label (layered, microservices, monolith, MVC, event-driven, serverless, etc.)",
+  "project_goal": "one sentence product-level description of what this system does",
+  "architecture_style": "script-based / component-based / api-service / client-server / monolithic / static-web",
   "key_modules": ["ONLY real filenames from the === FILE: headers ==="],
   "core_features": ["specific implemented capability derived from actual code — NOT generic"],
   "target_users": "specific real-world users this system serves",
@@ -50,6 +50,7 @@ OUTPUT (JSON only — no markdown, no explanation):
 
 STRICT RULES:
 - key_modules MUST contain ONLY real filenames from the === FILE: headers ===
+- NEVER expose secrets, environment values, internal paths, logs, or stack traces
 - core_features MUST be derived from actual code — never generic
 - Lists MAY be empty when the code does not support a claim
 - Do NOT invent values to fill arrays

@@ -5,18 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 
-SYSTEM_PROMPT = """You are a senior software architect and AI engineer.
-
-Answer using the provided project intelligence first and the LLM second.
-Always ground explanations in the known modules, workflows, and relationships.
-Return three clear sections in this order:
-1. Summary
-2. Developer Explanation
-3. Architect Explanation
-Each section should explain why the system is designed this way, not just what it does.
-Never use broken-system language. Prefer phrases like "partial analysis completed" and "using inferred insights".
-If a detail is missing, infer carefully from the available architecture, modules, and summary.
-Give practical, engineer-friendly answers with clear reasoning.
+SYSTEM_PROMPT = """You are a fast AI assistant for code analysis.
+Answer in 2 to 4 lines.
+No filler.
+Be direct.
+No system messages.
+Never expose secrets, environment variables, internal paths, raw logs, stack traces, or debug traces.
+Generalize file references to filenames only.
 """
 
 _MAX_LIST_ITEMS = 6
@@ -85,9 +80,9 @@ def build_chat_prompt(
         f"Memory Focus: {_clip(structured_context.get('memory_focus', ''), 140)}\n"
         f"Viewed Modules: {_stringify_list(structured_context.get('modules_viewed', []), 'Not available')}\n"
         f"Viewed Files: {_stringify_list(structured_context.get('files_viewed', []), 'Not available')}\n"
-        f"Engineer Summary: {_clip(explanations.get('summary', ''), 220)}\n"
-        f"Developer View: {_clip(explanations.get('developer', ''), 320)}\n"
-        f"Architect View: {_clip(explanations.get('architect', ''), 320)}\n"
+        f"Quick Notes: {_clip(explanations.get('summary', ''), 220)}\n"
+        f"Developer Notes: {_clip(explanations.get('developer', ''), 320)}\n"
+        f"Architect Notes: {_clip(explanations.get('architect', ''), 320)}\n"
         f"Session Title: {_clip(structured_context.get('session_title'), 120)}\n"
         f"Session Preview: {_clip(structured_context.get('session_preview'), 180)}"
     )
@@ -102,5 +97,12 @@ def build_chat_prompt(
         f"COMPACT ANALYSIS SNAPSHOT:\n{compact_raw_context}\n\n"
         f"RECENT CONVERSATION:\n{_format_memory(recent_history)}\n\n"
         f"USER QUESTION:\n{question.strip()}\n\n"
-        "ASSISTANT ANSWER:"
+        "ASSISTANT ANSWER:\n"
+        "- Answer the user's question only.\n"
+        "- 2 to 4 lines max.\n"
+        "- No headings.\n"
+        "- No meta commentary.\n"
+        "- No process talk.\n"
+        "- Add filenames only if directly relevant.\n"
+        "- Do not include internal paths, secrets, environment values, logs, or stack traces."
     )
